@@ -1,0 +1,48 @@
+{
+  "name": "dsh-session-inherit",
+  "version": "0.1.0",
+  "description": "Inherit a long DeepSeek Harness session into a clean one: adds an \"Inherit\" row to the session \"...\" menu, mechanically extracts concrete anchors (task, recent instructions, touched files, commands, todos) from the source session log without calling an LLM, creates a brand-new session in the same workspace and sends that handoff as its first message.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "lib",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "inherit",
+    "handoff",
+    "context",
+    "continue"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/extract.test.mjs && node test/host.test.mjs && node test/client.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
