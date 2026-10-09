@@ -28,6 +28,15 @@
     "continue"
   ],
   "license": "MIT",
+  "author": "MacilyDots",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MacilyDots/dsh-session-inherit.git"
+  },
+  "homepage": "https://github.com/MacilyDots/dsh-session-inherit#readme",
+  "bugs": {
+    "url": "https://github.com/MacilyDots/dsh-session-inherit/issues"
+  },
   "scripts": {
     "test": "node test/extract.test.mjs && node test/host.test.mjs && node test/client.test.mjs"
   },
