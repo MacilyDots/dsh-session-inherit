@@ -457,18 +457,59 @@ function renameChild(ctx, child, sourceTitle) {
   }
 }
 
+/**
+ * 解析 `/inherit` 的原始输入：`[<sessionId>] [--next <下一步>]`。
+ *
+ * 用显式 `--next` 标记而不是"把剩下的文本当下一步"：`/inherit 修复登录 bug`
+ * 这种写法会被当成会话 id 直接报错，比默默猜错更清楚。下一步的文本允许带空格，
+ * 一直延伸到输入结尾。
+ * @param {string} raw - 原始输入（已 trim）。
+ * @returns {{sessionId: string, nextStep: string|undefined}} 解析结果。
+ */
+function parseInheritArgs(raw) {
+  if (raw.length === 0) return { sessionId: '', nextStep: undefined }
+  const marker = raw.match(/(?:^|\s)--next(?:\s|$)/)
+  if (marker === null) return { sessionId: raw, nextStep: undefined }
+  const before = raw.slice(0, marker.index).trim()
+  const after = raw.slice(marker.index + marker[0].length).trim()
+  return { sessionId: before, nextStep: after.length > 0 ? after : undefined }
+}
+
 // ── 两个处理器 ────────────────────────────────────────────────────────────
+
+/**
+ * 给绝对路径锚点打上「已不存在」标记（就地修改）。
+ *
+ * 纯机械、零模型成本，但能省掉新会话去翻一个已被删除或改名的文件——这正是
+ * 新会话最容易浪费头几步的地方。只查绝对路径：相对引用的基准目录不确定，
+ * 查了反而误导。
+ * @param {object} anchors - collectAnchors 的结果。
+ */
+function markMissingFiles(anchors) {
+  for (const group of [anchors.edited, anchors.read, anchors.mentioned]) {
+    if (!Array.isArray(group)) continue
+    for (const file of group) {
+      if (file === null || typeof file !== 'object' || file.absolute === false) continue
+      try {
+        file.missing = !existsSync(file.path)
+      } catch {
+        /* 路径不可查（权限、非法字符等）：当作存在，不标注 */
+      }
+    }
+  }
+}
 
 /**
  * 生成交接单（preview 与 commit 共用）。
  * @param {object} ctx - Cordis 上下文。
- * @param {{sessionId: string, title?: string, recentUsers: number, nextStep?: string}} input - 输入。
+ * @param {{sessionId: string, title?: string, recentUsers: number, nextStep?: string, cacheTtlMs?: number}} input - 输入。
  * @returns {Promise<{doc: string, header: object, events: object[], anchors: object, route: object|null}>} 结果。
  */
 async function buildDoc(ctx, input) {
   const snapshot = await readSnapshot(ctx, input.sessionId, Number.isFinite(input.cacheTtlMs) ? input.cacheTtlMs : SNAPSHOT_TTL_MS)
   const header = snapshot.session !== null && typeof snapshot.session === 'object' ? snapshot.session : {}
   const anchors = collectAnchors(snapshot.events, { recentUsers: input.recentUsers })
+  markMissingFiles(anchors)
   const route = resolveRoute(ctx, snapshot.events)
   const doc = composeInheritDoc(
     {
@@ -536,6 +577,9 @@ async function handlePreview(ctx, resolved, req, res) {
         lastTime: built.anchors.lastTime,
         lastTimeText: formatTime(built.anchors.lastTime),
         fileCount: built.anchors.files.length,
+        editedCount: built.anchors.edited.length,
+        readCount: built.anchors.read.length,
+        failureCount: built.anchors.failures.length,
         commandCount: built.anchors.commands.length,
         todoCount: built.anchors.todos.length,
         inheritedCount: built.anchors.inheritedCount,
@@ -580,8 +624,12 @@ async function handleCommit(ctx, resolved, req, res) {
   const title = typeof args?.title === 'string' ? args.title : undefined
   const start = typeof args?.start === 'boolean' ? args.start : resolved.startByDefault
 
-  let doc = typeof args?.doc === 'string' ? args.doc : ''
-  note(`commit start session=${sessionId} start=${start} docFromClient=${doc.trim().length > 0} docLen=${doc.length}`)
+  // 区分「客户端没传 doc」（agent 工具 / 命令通路）与「客户端传了空 doc」
+  // （用户在预览框里把交接单清空）。后者不能静默换成自动生成的版本——那是
+  // 用户明确表达的意图，只该如实报错。
+  const docFromClient = typeof args?.doc === 'string' ? args.doc : null
+  let doc = docFromClient ?? ''
+  note(`commit start session=${sessionId} start=${start} docFromClient=${docFromClient !== null} docLen=${doc.length}`)
 
   let header
   let route = null
@@ -595,7 +643,7 @@ async function handleCommit(ctx, resolved, req, res) {
     }), 30_000, '读取源会话')
     header = built.header
     route = built.route
-    if (doc.trim().length === 0) doc = built.doc
+    if (docFromClient === null) doc = built.doc
     note(`commit: 源会话已读 events=${built.events.length} preset=${header.agentPreset ?? '(none)'} route=${route === null ? '(none)' : `${route.provider}/${route.model}`} finalDocLen=${doc.length}`)
   } catch (error) {
     note(`commit FAIL 读取源会话: ${String(error?.message ?? error)}`)
@@ -843,22 +891,24 @@ export function apply(ctx, config = {}) {
       sub.commands.register({
         name: 'inherit',
         description: '把当前会话（或指定会话）的具体锚点提取成交接单，在一个全新会话里继续工作；不复制旧对话历史，也不调用 LLM。不带参数时继承当前会话。',
-        input: { hint: '[<sessionId>]' },
+        input: { hint: '[<sessionId>] [--next <下一步>]' },
         async handler(invocation) {
           const agentSession = invocation !== null && invocation !== undefined && invocation.agent !== undefined
             ? invocation.agent.session
             : undefined
           const raw = typeof invocation?.rawInput === 'string' ? invocation.rawInput.trim() : ''
-          const target = raw.length > 0
-            ? raw
+          const parsed = parseInheritArgs(raw)
+          const target = parsed.sessionId.length > 0
+            ? parsed.sessionId
             : (agentSession !== undefined && agentSession !== null ? agentSession.id : '')
           if (!SESSION_ID_RE.test(target)) {
-            return { kind: 'error', text: `继承：会话 id 不合法（${target.length > 0 ? target : '空'}）；用法 /inherit [<sessionId>]` }
+            return { kind: 'error', text: `继承：会话 id 不合法（${target.length > 0 ? target : '空'}）；用法 /inherit [<sessionId>] [--next <下一步>]` }
           }
           try {
             const built = await withTimeout(buildDoc(ctx, {
               sessionId: target,
               recentUsers: resolved.recentUsers,
+              nextStep: parsed.nextStep,
               cacheTtlMs: resolved.cacheTtlMs,
             }), 30_000, '读取源会话')
             const child = await withTimeout(createChild(ctx, { header: built.header, route: built.route }), 20_000, '新建会话')

@@ -251,7 +251,13 @@ test('点「创建并继承」必须真的发出 commit 请求（回归：未声
       })
     }
     return Promise.resolve({
-      json: () => Promise.resolve({ ok: true, sessionId: CHILD, mode: 'appended', workspace: true }),
+      json: () => Promise.resolve({
+        ok: true,
+        sessionId: CHILD,
+        mode: 'appended',
+        workspace: true,
+        note: '已改为只注入交接单：交接单已写入新会话，打开后直接说要做什么即可。',
+      }),
     })
   }
 
@@ -308,6 +314,85 @@ test('点「创建并继承」必须真的发出 commit 请求（回归：未声
     assert.equal(commitBody.sessionId, SOURCE)
     assert.equal(commitBody.start, true)
     assert.match(commitBody.doc, /会话继承单/, 'commit 必须带上交接单正文（doc 状态没被填充过就是回归）')
+
+    // 5) 降级路径（宿主没能自动开始）必须停在对话框里如实说明，而不是像以前
+    //    那样只 console.warn、静默关框，让用户以为新会话已经在跑了。
+    const doneTree = harness.render(dialogComponent)
+    assert.ok(doneTree !== null, '降级时对话框不应关闭')
+    const flat = JSON.stringify(doneTree)
+    assert.ok(flat.includes('已改为只注入交接单'), '应显示宿主返回的 note')
+    assert.ok(flat.includes(CHILD), '应显示新会话 id')
+    const openButton = collect(doneTree)
+      .find((node) => node.type === 'button' && Array.isArray(node.children) && node.children[0] === '打开新会话')
+    assert.ok(openButton !== undefined, '应提供「打开新会话」按钮')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('正常路径（mode=prompted）关框并打开新会话，不打断流程', async () => {
+  const harness = createHarness()
+  const opened = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (url) => {
+    if (String(url).includes('/preview')) {
+      return Promise.resolve({
+        json: () => Promise.resolve({
+          ok: true,
+          doc: '📋 会话继承单\n\n## 下一步\n做 A',
+          source: { sessionId: SOURCE, turns: 1, editedCount: 0, failureCount: 0, commandCount: 0, todoCount: 0 },
+          route: null,
+        }),
+      })
+    }
+    return Promise.resolve({
+      json: () => Promise.resolve({ ok: true, sessionId: CHILD, mode: 'prompted', workspace: true, note: '已发出' }),
+    })
+  }
+
+  try {
+    const { mod } = await loadClient({ react: harness.react })
+    let menuComponent = null
+    let dialogComponent = null
+    const ctx = {
+      get(name) {
+        if (name === 'sessions') return { binding: () => ({}) }
+        if (name === 'uiWorkspace') return { openSession(id) { opened.push(id) } }
+        return undefined
+      },
+      effect(callback) { const disposer = callback(); return typeof disposer === 'function' ? disposer : () => {} },
+      slots: {
+        inject(_slotName, callback) { callback(); return () => {} },
+        register(options, component) {
+          if (options.name === MENU_SLOT) menuComponent = component
+          if (options.name === OVERLAY_SLOT) dialogComponent = component
+          return () => {}
+        },
+      },
+    }
+    mod.apply(ctx)
+    harness.render(dialogComponent)
+    harness.flushEffects(dialogComponent)
+
+    const menuTree = harness.render(menuComponent, {
+      sessionId: SOURCE,
+      displayTitle: '演示会话',
+      useMenuOpenState: () => [true, () => {}],
+    })
+    const menuButton = collect(menuTree).find((node) => node.type === 'button' && node.props.role === 'menuitem')
+    assert.ok(menuButton !== undefined)
+    menuButton.props.onClick()
+    await settle()
+
+    const dialogTree = harness.render(dialogComponent)
+    const confirmButton = collect(dialogTree)
+      .find((node) => node.type === 'button' && node.children[0] === '创建并继承')
+    assert.ok(confirmButton !== undefined)
+    confirmButton.props.onClick()
+    await settle()
+
+    assert.equal(harness.render(dialogComponent), null, '正常路径应关掉对话框')
+    assert.deepEqual(opened, [CHILD], '应打开新会话')
   } finally {
     globalThis.fetch = originalFetch
   }

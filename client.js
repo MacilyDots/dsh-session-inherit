@@ -44,14 +44,16 @@ window.__ModuleLoader__.load({
       'dialog.loading': '正在读取源会话并提取交接单…',
       'dialog.desc': '新建一个空会话，只把下面这份交接单作为首条消息带过去；旧对话历史不会被复制。',
       'dialog.source': '源会话',
-      'dialog.stats': '共 {turns} 轮 · 文件 {files} 个 · 命令 {commands} 条 · 待办 {todos} 条',
-      'dialog.docLabel': '交接单（可直接编辑；在「## 7. 下一步」下面写你要接着做的事）',
+      'dialog.stats': '共 {turns} 轮 · 改过 {edited} 个文件 · 失败 {failures} 条 · 命令 {commands} 条 · 待办 {todos} 条',
+      'dialog.docLabel': '交接单（可直接编辑；在「## 下一步」下面写你要接着做的事）',
       'dialog.start': '创建后立即开始工作（把交接单作为首条消息发出）',
       'dialog.cancel': '取消',
       'dialog.cancelWhileBusy': '停止等待',
       'dialog.confirm': '创建并继承',
       'dialog.confirming': '正在创建…',
       'dialog.error': '继承失败',
+      'dialog.doneTitle': '新会话已创建',
+      'dialog.openNow': '打开新会话',
       'dialog.nextStepHint': '提示：交接单里的「下一步」越具体越好（点名文件 + 一个动作）。',
     }
     var enDict = {
@@ -61,14 +63,16 @@ window.__ModuleLoader__.load({
       'dialog.loading': 'Reading the source session and extracting the handoff…',
       'dialog.desc': 'Creates a blank session carrying only the handoff below as its first message. No old history is copied.',
       'dialog.source': 'Source session',
-      'dialog.stats': '{turns} turns · {files} files · {commands} commands · {todos} todos',
-      'dialog.docLabel': 'Handoff (editable; write what to do next under "## 7. 下一步")',
+      'dialog.stats': '{turns} turns · {edited} files edited · {failures} failures · {commands} commands · {todos} todos',
+      'dialog.docLabel': 'Handoff (editable; write what to do next under the "下一步" section)',
       'dialog.start': 'Start working immediately (send the handoff as the first message)',
       'dialog.cancel': 'Cancel',
       'dialog.cancelWhileBusy': 'Stop waiting',
       'dialog.confirm': 'Create and inherit',
       'dialog.confirming': 'Creating…',
       'dialog.error': 'Inherit failed',
+      'dialog.doneTitle': 'New session created',
+      'dialog.openNow': 'Open new session',
       'dialog.nextStepHint': 'Tip: the more specific the "next step" (a named file plus one action), the better.',
     }
 
@@ -237,7 +241,8 @@ window.__ModuleLoader__.load({
       if (source === null || typeof source !== 'object') return ''
       return t('dialog.stats', {
         turns: source.turns !== undefined ? source.turns : 0,
-        files: source.fileCount !== undefined ? source.fileCount : 0,
+        edited: source.editedCount !== undefined ? source.editedCount : 0,
+        failures: source.failureCount !== undefined ? source.failureCount : 0,
         commands: source.commandCount !== undefined ? source.commandCount : 0,
         todos: source.todoCount !== undefined ? source.todoCount : 0,
       })
@@ -308,11 +313,21 @@ window.__ModuleLoader__.load({
               setError(data !== null && typeof data === 'object' && data.error ? data.error : '未知错误')
               return
             }
-            if (data.mode !== 'prompted') {
-              console.warn('[dsh-session-inherit] ' + String(data.note || data.mode))
+            // 正常路径（交接单已作为首条消息发出）直接关框并打开新会话，不加摩擦。
+            if (data.mode === 'prompted') {
+              setDetail(null)
+              openWhenReady(data.sessionId)
+              return
             }
-            setDetail(null)
-            openWhenReady(data.sessionId)
+            // 降级路径（没自动开始 / 自动开始失败）必须让用户看见：以前这里只
+            // console.warn，对话框静默关掉，用户会以为新会话已经在跑了。
+            console.warn('[dsh-session-inherit] ' + String(data.note || data.mode))
+            setDetail({
+              phase: 'done',
+              sessionId: data.sessionId,
+              mode: data.mode,
+              note: typeof data.note === 'string' ? data.note : '',
+            })
           })
           .catch(function (err) {
             window.clearTimeout(timer)
@@ -337,16 +352,18 @@ window.__ModuleLoader__.load({
       }
 
       var body = []
-      body.push(h('div', {
-        key: 'meta',
-        style: {
-          color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-          fontSize: 12,
-          lineHeight: '18px',
-          marginBottom: 10,
-          wordBreak: 'break-all',
-        },
-      }, headText))
+      if (headText.length > 0) {
+        body.push(h('div', {
+          key: 'meta',
+          style: {
+            color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+            fontSize: 12,
+            lineHeight: '18px',
+            marginBottom: 10,
+            wordBreak: 'break-all',
+          },
+        }, headText))
+      }
 
       if (detail.phase === 'loading') {
         body.push(h('div', {
@@ -359,6 +376,21 @@ window.__ModuleLoader__.load({
           role: 'alert',
           style: { fontSize: 13, color: 'var(--dsw-alias-state-error-primary, #e5484d)' },
         }, error))
+      } else if (detail.phase === 'done') {
+        // 会话建好了但没自动开始：如实说清，并把新会话 id 摆出来。
+        body.push(h('div', {
+          key: 'done',
+          style: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary, inherit)' },
+        }, detail.note))
+        body.push(h('div', {
+          key: 'doneId',
+          style: {
+            marginTop: 8,
+            fontSize: 12,
+            color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+            wordBreak: 'break-all',
+          },
+        }, String(detail.sessionId)))
       } else if (detail.phase === 'ready') {
         body.push(h('label', {
           key: 'docLabel',
@@ -451,9 +483,31 @@ window.__ModuleLoader__.load({
           },
         }, busy === true ? t('dialog.confirming') : t('dialog.confirm')))
       }
+      if (detail.phase === 'done') {
+        footer.push(h('button', {
+          key: 'open',
+          type: 'button',
+          onClick: function () {
+            var id = detail.sessionId
+            close()
+            openWhenReady(id)
+          },
+          style: {
+            padding: '6px 14px',
+            borderRadius: 8,
+            border: '1px solid var(--dsw-alias-brand-primary, #4d6bfe)',
+            background: 'var(--dsw-alias-brand-primary, #4d6bfe)',
+            color: '#fff',
+            fontSize: 13,
+            cursor: 'pointer',
+          },
+        }, t('dialog.openNow')))
+      }
 
       var title = t('dialog.title')
-      var description = detail.phase === 'error' ? t('dialog.error') : t('dialog.desc')
+      var description = detail.phase === 'error'
+        ? t('dialog.error')
+        : (detail.phase === 'done' ? t('dialog.doneTitle') : t('dialog.desc'))
 
       if (Modal === null) {
         return h('div', {

@@ -31,6 +31,23 @@ function sampleEvents() {
     { type: 'tool/call', seq: 6, time: 1_700_000_005_000, data: { callId: 'c3', name: 'todo_write', arguments: JSON.stringify({ todos: [{ content: '复算连通性', status: 'pending' }] }) } },
     { type: 'assistant/message', seq: 7, time: 1_700_000_006_000, data: { message: { content: [{ type: 'text', text: '已经改好，待复算。' }] } } },
     { type: 'request/header', seq: 8, time: 1_700_000_007_000, data: { header: { config: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' } }, reason: 'initial' } },
+    { type: 'tool/call', seq: 9, time: 1_700_000_008_000, data: { callId: 'c4', name: 'edit', arguments: JSON.stringify({ file_path: 'X:\\work\\demo\\art\\weapon.png.meta', old_string: 'a', new_string: 'b' }) } },
+    {
+      type: 'tool/result',
+      seq: 10,
+      time: 1_700_000_009_000,
+      data: {
+        turn: 1,
+        step: 3,
+        message: {
+          role: 'tool',
+          toolCallId: 'c4',
+          isError: true,
+          content: [{ type: 'text', text: 'Error: cannot write "X:\\work\\demo\\art\\weapon.png.meta": file changed since it was read — re-read the file, then retry' }],
+        },
+        error: { name: 'FsError', code: 'FS_STALE_VERSION' },
+      },
+    },
   ]
 }
 
@@ -95,6 +112,9 @@ function bootstrap(services = {}, config = { cacheTtlMs: 0 }) {
   }
   const ctx = {
     agents: services.agents,
+    // 命令注册走的是 `sub.commands.register`（属性访问），所以这里必须真的挂上属性，
+    // 只放进 get() 是不够的。
+    commands: services.commands,
     get(serviceName) {
       if (serviceName === 'webServer') return webServer
       if (serviceName === 'sessionQuery') return services.sessionQuery
@@ -103,6 +123,7 @@ function bootstrap(services = {}, config = { cacheTtlMs: 0 }) {
       if (serviceName === 'sessionTitle') return services.sessionTitle
       if (serviceName === 'agentPresets') return services.agentPresets
       if (serviceName === 'agentDefaultModel') return services.agentDefaultModel
+      if (serviceName === 'commands') return services.commands
       return undefined
     },
     effect(callback) {
@@ -147,7 +168,13 @@ test('preview 返回带具体锚点的交接单', async () => {
   assert.match(json.doc, /复算连通性/)
   assert.ok(!json.doc.includes('注入内容不该出现'), '注入消息不得进入交接单')
   assert.equal(json.source.turns, 1)
-  assert.equal(json.source.fileCount, 1)
+  assert.equal(json.source.fileCount, 2)
+  assert.equal(json.source.editedCount, 1)
+  assert.equal(json.source.failureCount, 1)
+  assert.match(json.doc, /## 改过的文件/)
+  assert.match(json.doc, /## 最近失败/)
+  assert.match(json.doc, /FS_STALE_VERSION/)
+  assert.ok(!/^## \d+\./m.test(json.doc), '章节标题不应带序号')
   assert.equal(json.route.provider, 'opencode-go')
   assert.equal(json.route.model, 'deepseek-v4.1-flash')
   assert.equal(sessionQuery.calls, 1)
@@ -283,4 +310,47 @@ test('enabled:false 时不注册任何路由', () => {
   }
   apply(ctx, { enabled: false })
   assert.equal(routes.size, 0)
+})
+
+test('客户端把交接单清空时报错，不静默换成自动生成的版本', async () => {
+  const { routes } = bootstrap({ sessionQuery: makeSessionQuery(sampleEvents()) })
+  const { status, json } = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, doc: '' })
+  assert.equal(status, 400)
+  assert.match(json.error, /交接单为空/)
+})
+
+test('/inherit 支持 --next 指定下一步', async () => {
+  const registered = []
+  const appended = []
+  const commands = { register(spec) { registered.push(spec); return () => {} } }
+  bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    commands,
+    agents: {
+      async create(options) {
+        return { agent: { session: { id: options.sessionId, append(type, data) { appended.push({ type, data }) } } } }
+      },
+    },
+  }, { cacheTtlMs: 0, startByDefault: false })
+
+  const spec = registered.find((entry) => entry.name === 'inherit')
+  assert.ok(spec !== undefined, '/inherit 未注册')
+
+  // 不带 sessionId：继承当前会话，--next 之后全部算下一步。
+  const withNext = await spec.handler({ rawInput: '--next 先跑一次 npm test', agent: { session: { id: SESSION_ID } } })
+  assert.equal(withNext.kind, 'success')
+  assert.equal(appended.length, 1)
+  assert.match(appended[0].data.content[0].text, /先跑一次 npm test/)
+  assert.match(appended[0].data.content[0].text, /把 demo 的武器贴图修一下/)
+
+  // 显式 sessionId + --next。
+  appended.length = 0
+  const explicit = await spec.handler({ rawInput: `${SESSION_ID} --next 换个文件继续`, agent: { session: { id: SESSION_ID } } })
+  assert.equal(explicit.kind, 'success')
+  assert.match(appended[0].data.content[0].text, /换个文件继续/)
+
+  // 没有 --next 的裸文本只可能是会话 id，不合法就如实报错（不猜成"下一步"）。
+  const bad = await spec.handler({ rawInput: '修复登录 bug', agent: { session: { id: SESSION_ID } } })
+  assert.equal(bad.kind, 'error')
+  assert.match(bad.text, /不合法/)
 })
