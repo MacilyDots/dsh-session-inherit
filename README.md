@@ -64,7 +64,7 @@ The handoff also hard-codes three rules at the top:
 
 ## 任务目标                    ← the source session's first real user message
 ## 改过的文件（实际写入/修改过）  ← from edit/write `file_path`, most recently changed first
-## 最近失败                    ← the source session's last few tool errors (with error codes)
+## 最近失败                    ← the source session's last few tool errors (turn + error code)
 ## 最近的用户指令（由旧到新）     ← verbatim text of `source.kind === 'user'` messages
 ## 读过的文件（只读取过，未修改）
 ## 文中提到的路径               ← paths scraped out of tool-argument bodies; may be noise
@@ -101,11 +101,13 @@ as "mentioned in text" instead.
 of 374 `tool/result` events were failures, e.g.:
 
 ```
-[edit] FS_STALE_VERSION：cannot write "…\inject-codex.ps1": file changed since it was read — re-read the file, then retry
+- (t5) `edit` FS_STALE_VERSION：cannot write "…\inject-codex.ps1": file changed since it was read — re-read the file, then retry
 ```
 
-That is the most direct clue for "what to do next", and it is extracted mechanically. The
-363 successful ones are dropped, as are user-initiated aborts (`AbortError`) and interrupted
+Each entry carries its **turn number** — failures in that section can span several turns,
+and without the marker the new session cannot tell which of them are stale news. That is
+the most direct clue for "what to do next", and it is extracted mechanically. The 363
+successful ones are dropped, as are user-initiated aborts (`AbortError`) and interrupted
 auto-reviews; identical messages repeated across several tools are merged into one.
 
 Absolute-path anchors also get an existence check: anything already deleted or renamed is
@@ -120,10 +122,14 @@ looking for it.
    **Any session works, including cold ones** — reading goes through
    `sessionQuery.readSession` and does not activate an agent.
 2. Click **Inherit**.
-3. A preview opens: source session info on top (title / turns / files edited / failures /
-   commands / todos), the editable handoff in the middle, and a checkbox at the bottom.
-4. Under `## 下一步`, write what you want done next — **the more specific the better**
+3. A preview opens, top to bottom: source session info (title / turns / files edited /
+   failures / commands / todos) → a **"Next step" input box** (optional) → the
+   "start working immediately" checkbox → the handoff, collapsed into a single row.
+4. Write what you want done next in that box — **the more specific the better**
    (name the file, name the single action) — then click "创建并继承" (Create and inherit).
+   To edit the handoff itself, click "▸ Show the full handoff (editable)". It starts
+   collapsed because most of the time you only want to write one sentence, not read
+   several thousand characters.
 
 The new session opens automatically, titled `继承: <source title>`, with the same working
 directory, model route, and agent preset as the source session.
@@ -138,6 +144,18 @@ automatically (`prompt` failed or is unavailable), the dialog does not silently 
 stays open showing the reason and the new session id, plus an "Open new session" button.
 Previously this path only did `console.warn`, so the dialog vanished and you would assume
 the new session was already running.
+
+The "Next step" box and the handoff are **two independent sources**. If commit receives
+both, the host writes the box's text into the "## 下一步" section of that handoff — so
+even when you expand and edit the handoff, neither side gets silently dropped.
+
+**Repeat inheritance is flagged.** The source session (often cold) **cannot be renamed**:
+`sessionTitle.rename(session, title)` requires a live session object (it asserts
+`ctx.sessions.get(id) === session`), and `sessions.get` documents that it returns
+`undefined` for a cold session. So "where did this session get inherited to" is recorded in
+`%DSH_HOME%\session-inherit\history.json` and surfaced the moment you open the preview
+again: "This session has been inherited N time(s); most recently … → …". The record stores
+only session ids and timestamps, capped at 200 source sessions with 10 entries each.
 
 ### Entry point 2: the `/inherit` command
 
@@ -258,9 +276,9 @@ Override in the profile's `cordis.patch.yml` (all optional):
 ## Tests
 
 ```sh
-node test/extract.test.mjs   # extractor pure functions (25)
-node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, and /inherit argument parsing against a fake ctx (12)
-node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → confirm → commit (5)
+node test/extract.test.mjs   # extractor pure functions (26)
+node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, and the inherit ledger against a fake ctx (14)
+node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (5)
 ```
 
 ## Relation to existing plugins

@@ -45,7 +45,11 @@ window.__ModuleLoader__.load({
       'dialog.desc': '新建一个空会话，只把下面这份交接单作为首条消息带过去；旧对话历史不会被复制。',
       'dialog.source': '源会话',
       'dialog.stats': '共 {turns} 轮 · 改过 {edited} 个文件 · 失败 {failures} 条 · 命令 {commands} 条 · 待办 {todos} 条',
-      'dialog.docLabel': '交接单（可直接编辑；在「## 下一步」下面写你要接着做的事）',
+      'dialog.nextStepLabel': '下一步（可以不写）',
+      'dialog.nextStepPlaceholder': '越具体越好：点名哪个文件 + 做哪一个动作。留空的话，新会话会先问你一句要做什么。',
+      'dialog.docShow': '展开交接单全文（可编辑）',
+      'dialog.docHide': '收起交接单',
+      'dialog.inherited': '这个会话已经被继承过 {count} 次，最近一次 {time} → {child}',
       'dialog.start': '创建后立即开始工作（把交接单作为首条消息发出）',
       'dialog.cancel': '取消',
       'dialog.cancelWhileBusy': '停止等待',
@@ -64,7 +68,11 @@ window.__ModuleLoader__.load({
       'dialog.desc': 'Creates a blank session carrying only the handoff below as its first message. No old history is copied.',
       'dialog.source': 'Source session',
       'dialog.stats': '{turns} turns · {edited} files edited · {failures} failures · {commands} commands · {todos} todos',
-      'dialog.docLabel': 'Handoff (editable; write what to do next under the "下一步" section)',
+      'dialog.nextStepLabel': 'Next step (optional)',
+      'dialog.nextStepPlaceholder': 'The more specific the better: name the file and the single action. Leave it blank and the new session will ask you first.',
+      'dialog.docShow': 'Show the full handoff (editable)',
+      'dialog.docHide': 'Hide the handoff',
+      'dialog.inherited': 'This session has been inherited {count} time(s); most recently {time} → {child}',
       'dialog.start': 'Start working immediately (send the handoff as the first message)',
       'dialog.cancel': 'Cancel',
       'dialog.cancelWhileBusy': 'Stop waiting',
@@ -204,6 +212,7 @@ window.__ModuleLoader__.load({
               doc: data.doc,
               source: data.source,
               route: data.route,
+              inherited: Array.isArray(data.inherited) ? data.inherited : [],
             })
           })
           .catch(function (error) {
@@ -248,6 +257,20 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** 毫秒时间戳 → `MM-DD HH:mm`。 */
+    function shortTime(ms) {
+      if (typeof ms !== 'number' || ms <= 0) return ''
+      var d = new Date(ms)
+      var pad = function (n) { return String(n).length < 2 ? '0' + n : String(n) }
+      return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+    }
+
+    /** 会话 id 缩短，避免在提示行里铺满 40 个字符。 */
+    function shortId(id) {
+      var text = String(id === null || id === undefined ? '' : id)
+      return text.length > 22 ? text.slice(0, 22) + '…' : text
+    }
+
     function InheritDialog() {
       useLocaleRevision()
       var statePair = React.useState(null)
@@ -265,6 +288,14 @@ window.__ModuleLoader__.load({
       var errorPair = React.useState(null)
       var error = errorPair[0]
       var setError = errorPair[1]
+      var nextStepPair = React.useState('')
+      var nextStep = nextStepPair[0]
+      var setNextStep = nextStepPair[1]
+      // 交接单默认折叠：多数时候用户只想写一句「下一步」，不想逐字审阅几千字的
+      // 交接单全文；展开只为偶尔需要动手改的时候。
+      var docOpenPair = React.useState(false)
+      var docOpen = docOpenPair[0]
+      var setDocOpen = docOpenPair[1]
 
       React.useEffect(function () {
         var handler = function (event) {
@@ -272,6 +303,8 @@ window.__ModuleLoader__.load({
           setDetail(next)
           setError(next.phase === 'error' ? next.error : null)
           setDoc(typeof next.doc === 'string' ? next.doc : '')
+          setNextStep('')
+          setDocOpen(false)
           setBusy(false)
         }
         window.addEventListener(EVENT, handler)
@@ -301,6 +334,9 @@ window.__ModuleLoader__.load({
             sessionId: detail.sessionId,
             title: detail.title,
             doc: doc,
+            // 独立输入框里填的下一步。宿主会把它写进上面那份 doc 的「## 下一步」节，
+            // 所以即使用户展开改过交接单，两边也不会互相盖掉。
+            nextStep: nextStep,
             start: start,
           }),
           signal: abort.signal,
@@ -365,6 +401,26 @@ window.__ModuleLoader__.load({
         }, headText))
       }
 
+      // 「这个会话已经被继承过」：源会话（常常是冷的）改不了标题——sessionTitle.rename
+      // 要求活着的 session 对象——所以提示放在用户即将再次继承的这个时刻。
+      var inherited = Array.isArray(detail.inherited) ? detail.inherited : []
+      if (inherited.length > 0) {
+        var latestMark = inherited[inherited.length - 1]
+        body.push(h('div', {
+          key: 'inherited',
+          style: {
+            fontSize: 12,
+            lineHeight: '18px',
+            marginBottom: 10,
+            color: 'var(--dsw-alias-state-warning-primary, #d97706)',
+          },
+        }, t('dialog.inherited', {
+          count: inherited.length,
+          time: shortTime(latestMark !== null && typeof latestMark === 'object' ? latestMark.at : 0),
+          child: shortId(latestMark !== null && typeof latestMark === 'object' ? latestMark.child : ''),
+        })))
+      }
+
       if (detail.phase === 'loading') {
         body.push(h('div', {
           key: 'loading',
@@ -392,31 +448,32 @@ window.__ModuleLoader__.load({
           },
         }, String(detail.sessionId)))
       } else if (detail.phase === 'ready') {
+        // 「下一步」是独立输入：交接单默认折叠之后，这里是主要的输入位置。
         body.push(h('label', {
-          key: 'docLabel',
+          key: 'nextStepLabel',
           style: { display: 'block', fontSize: 12, color: 'var(--dsw-alias-label-secondary, #8a8a8e)', marginBottom: 6 },
-        }, t('dialog.docLabel')))
+        }, t('dialog.nextStepLabel')))
         body.push(h('textarea', {
-          key: 'doc',
-          value: doc,
+          key: 'nextStep',
+          value: nextStep,
           spellCheck: false,
-          onChange: function (event) { setDoc(event.target.value) },
+          rows: 3,
+          placeholder: t('dialog.nextStepPlaceholder'),
+          onChange: function (event) { setNextStep(event.target.value) },
           style: {
             width: '100%',
-            minHeight: '44vh',
-            maxHeight: '58vh',
+            minHeight: 62,
+            maxHeight: '18vh',
             resize: 'vertical',
             boxSizing: 'border-box',
-            padding: 10,
+            padding: 8,
             borderRadius: 8,
             border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
             background: 'var(--dsw-alias-bg-base, transparent)',
             color: 'var(--dsw-alias-label-primary, inherit)',
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-            fontSize: 12,
-            lineHeight: '18px',
-            whiteSpace: 'pre',
-            overflow: 'auto',
+            fontSize: 13,
+            lineHeight: '20px',
+            fontFamily: 'inherit',
           },
         }))
         body.push(h('label', {
@@ -436,6 +493,53 @@ window.__ModuleLoader__.load({
           disabled: busy === true,
           onChange: function (event) { setStart(event.target.checked) },
         }), t('dialog.start')))
+        // 交接单默认折叠，点标题行才展开。
+        body.push(h('button', {
+          key: 'docToggle',
+          type: 'button',
+          onClick: function () { setDocOpen(docOpen !== true) },
+          style: {
+            display: 'block',
+            width: '100%',
+            marginTop: 12,
+            padding: '6px 10px',
+            textAlign: 'left',
+            border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
+            borderRadius: 8,
+            background: 'transparent',
+            color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+            font: 'inherit',
+            fontSize: 12,
+            lineHeight: '18px',
+            cursor: 'pointer',
+          },
+        }, (docOpen === true ? '▾ ' : '▸ ') + t(docOpen === true ? 'dialog.docHide' : 'dialog.docShow')))
+        if (docOpen === true) {
+          body.push(h('textarea', {
+            key: 'doc',
+            value: doc,
+            spellCheck: false,
+            onChange: function (event) { setDoc(event.target.value) },
+            style: {
+              width: '100%',
+              minHeight: '30vh',
+              maxHeight: '46vh',
+              marginTop: 6,
+              resize: 'vertical',
+              boxSizing: 'border-box',
+              padding: 10,
+              borderRadius: 8,
+              border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+              background: 'var(--dsw-alias-bg-base, transparent)',
+              color: 'var(--dsw-alias-label-primary, inherit)',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+              fontSize: 12,
+              lineHeight: '18px',
+              whiteSpace: 'pre',
+              overflow: 'auto',
+            },
+          }))
+        }
         body.push(h('div', {
           key: 'hint',
           style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #8a8a8e)' },

@@ -247,6 +247,7 @@ test('点「创建并继承」必须真的发出 commit 请求（回归：未声
           doc: '📋 会话继承单\n\n## 1. 任务目标\n演示用交接单',
           source: { sessionId: SOURCE, turns: 3, fileCount: 1, commandCount: 0, todoCount: 0 },
           route: null,
+          inherited: [{ child: CHILD, at: 1_791_561_308_478 }],
         }),
       })
     }
@@ -298,10 +299,41 @@ test('点「创建并继承」必须真的发出 commit 请求（回归：未声
     assert.equal(fetches.length, 1, '点菜单后应发出一次 preview 请求')
     assert.match(fetches[0].url, /\/__session-inherit\/preview$/)
 
-    // 3) preview 回来后对话框应有内容（交接单被填进编辑框）。
+    // 3) preview 回来后对话框应有内容。
     const dialogTree = harness.render(dialogComponent)
     assert.ok(dialogTree !== null, 'preview 成功后对话框应渲染')
-    const confirmButton = collect(dialogTree)
+
+    // 3.0) 这个会话以前被继承过：提示必须显示出来（源会话改不了标题的替代方案）。
+    assert.ok(
+      JSON.stringify(dialogTree).includes('已经被继承过 1 次'),
+      'preview 带回的继承记录应显示在对话框里',
+    )
+
+    // 3.1) 交接单默认折叠：不渲染正文编辑框，只有一行展开按钮。
+    const collapsed = collect(dialogTree)
+    assert.ok(
+      collapsed.every((node) => !(node.type === 'textarea' && String(node.props.value || '').includes('会话继承单'))),
+      '交接单默认必须折叠（不该一上来就渲染全文编辑框）',
+    )
+    const docToggle = collapsed.find((node) => node.type === 'button'
+      && typeof node.children[0] === 'string' && node.children[0].includes('展开交接单'))
+    assert.ok(docToggle !== undefined, '缺少展开交接单的按钮')
+
+    // 3.2) 展开后才出现正文编辑框。
+    docToggle.props.onClick()
+    const expanded = collect(harness.render(dialogComponent))
+    assert.ok(
+      expanded.some((node) => node.type === 'textarea' && String(node.props.value).includes('会话继承单')),
+      '展开后应出现交接单编辑框',
+    )
+
+    // 3.3) 独立「下一步」输入框存在，填的内容必须随 commit 发出去。
+    const nextStepBox = expanded.find((node) => node.type === 'textarea'
+      && typeof node.props.placeholder === 'string' && node.props.placeholder.includes('越具体越好'))
+    assert.ok(nextStepBox !== undefined, '缺少「下一步」独立输入框')
+    nextStepBox.props.onChange({ target: { value: '先跑 npm test' } })
+
+    const confirmButton = collect(harness.render(dialogComponent))
       .find((node) => node.type === 'button' && node.children[0] === '创建并继承')
     assert.ok(confirmButton !== undefined, '未找到「创建并继承」按钮')
 
@@ -314,6 +346,7 @@ test('点「创建并继承」必须真的发出 commit 请求（回归：未声
     assert.equal(commitBody.sessionId, SOURCE)
     assert.equal(commitBody.start, true)
     assert.match(commitBody.doc, /会话继承单/, 'commit 必须带上交接单正文（doc 状态没被填充过就是回归）')
+    assert.equal(commitBody.nextStep, '先跑 npm test', '独立输入框的内容必须随 commit 发出')
 
     // 5) 降级路径（宿主没能自动开始）必须停在对话框里如实说明，而不是像以前
     //    那样只 console.warn、静默关框，让用户以为新会话已经在跑了。

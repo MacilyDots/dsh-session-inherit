@@ -20,10 +20,10 @@
 // 全部按需查找，缺一个就降级一项，不让整个插件失活。
 
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { collectAnchors, composeInheritDoc, formatTime, DOC_MARK } from './lib/extract.mjs'
+import { collectAnchors, composeInheritDoc, formatTime, replaceNextStepSection, DOC_MARK } from './lib/extract.mjs'
 
 export const name = 'dsh-session-inherit'
 
@@ -475,6 +475,69 @@ function parseInheritArgs(raw) {
   return { sessionId: before, nextStep: after.length > 0 ? after : undefined }
 }
 
+// ── 继承记录（旁路） ──────────────────────────────────────────────────────
+//
+// 为什么是旁路文件，而不是"给源会话改标题"：
+// `sessionTitle.rename(session, title)` 的契约要求传入**活着的** session 对象
+// （源码里断言 `ctx.sessions.get(id) === session`，且 `sessions.get` 的文档明确
+// "returns undefined when no live session has that id"）。而本插件最主要的场景
+// 恰恰是对**冷会话**继承——那时根本拿不到 session 对象，改名必然失败。
+// 所以把「谁被继承到了哪里」记在会话日志之外，在**用户真正要做决定的时刻**
+// （点开预览框）提示出来，顺带挡住重复继承。
+
+/** @returns {string} 继承记录文件路径。 */
+function historyFile() {
+  return join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'session-inherit', 'history.json')
+}
+
+/**
+ * 读取继承记录（任何异常都当作空表：记录永远不能影响主流程）。
+ * @returns {Record<string, Array<{child: string, at: number}>>} 源会话 id → 继承出去的记录。
+ */
+function readHistory() {
+  try {
+    const parsed = JSON.parse(readFileSync(historyFile(), 'utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 记一笔「源会话 → 子会话」。
+ * @param {string} sourceId - 源会话 id。
+ * @param {string} childId - 新建的子会话 id。
+ */
+function rememberInherit(sourceId, childId) {
+  try {
+    const all = readHistory()
+    const list = Array.isArray(all[sourceId]) ? all[sourceId] : []
+    list.push({ child: childId, at: Date.now() })
+    all[sourceId] = list.slice(-10)
+    const keys = Object.keys(all)
+    if (keys.length > 200) {
+      // 只保留最近 200 个源会话，避免文件无限增长。
+      const lastAt = (id) => (Array.isArray(all[id]) && all[id].length > 0 ? all[id][all[id].length - 1].at : 0)
+      for (const key of keys.sort((a, b) => lastAt(a) - lastAt(b)).slice(0, keys.length - 200)) delete all[key]
+    }
+    const file = historyFile()
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify(all), 'utf8')
+    note(`history: ${sourceId} → ${childId} 已记录`)
+  } catch (error) {
+    note(`history 写入失败（已忽略）: ${String(error?.message ?? error)}`)
+  }
+}
+
+/**
+ * @param {string} sessionId - 源会话 id。
+ * @returns {Array<{child: string, at: number}>} 该会话已经继承出去的记录。
+ */
+function readInheritedBy(sessionId) {
+  const list = readHistory()[sessionId]
+  return Array.isArray(list) ? list : []
+}
+
 // ── 两个处理器 ────────────────────────────────────────────────────────────
 
 /**
@@ -585,6 +648,8 @@ async function handlePreview(ctx, resolved, req, res) {
         inheritedCount: built.anchors.inheritedCount,
       },
       route: built.route,
+      // 这个会话以前被继承过几次：在用户即将再次继承时提示，防止重复继承。
+      inherited: readInheritedBy(sessionId),
     })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
@@ -623,13 +688,14 @@ async function handleCommit(ctx, resolved, req, res) {
   }
   const title = typeof args?.title === 'string' ? args.title : undefined
   const start = typeof args?.start === 'boolean' ? args.start : resolved.startByDefault
+  const nextStep = typeof args?.nextStep === 'string' ? args.nextStep : undefined
 
   // 区分「客户端没传 doc」（agent 工具 / 命令通路）与「客户端传了空 doc」
   // （用户在预览框里把交接单清空）。后者不能静默换成自动生成的版本——那是
   // 用户明确表达的意图，只该如实报错。
   const docFromClient = typeof args?.doc === 'string' ? args.doc : null
   let doc = docFromClient ?? ''
-  note(`commit start session=${sessionId} start=${start} docFromClient=${docFromClient !== null} docLen=${doc.length}`)
+  note(`commit start session=${sessionId} start=${start} docFromClient=${docFromClient !== null} docLen=${doc.length} nextStepLen=${typeof nextStep === 'string' ? nextStep.trim().length : 0}`)
 
   let header
   let route = null
@@ -638,12 +704,18 @@ async function handleCommit(ctx, resolved, req, res) {
       sessionId,
       title,
       recentUsers: resolved.recentUsers,
-      nextStep: typeof args?.nextStep === 'string' ? args.nextStep : undefined,
+      nextStep,
       cacheTtlMs: resolved.cacheTtlMs,
     }), 30_000, '读取源会话')
     header = built.header
     route = built.route
-    if (docFromClient === null) doc = built.doc
+    if (docFromClient === null) {
+      doc = built.doc
+    } else if (typeof nextStep === 'string' && nextStep.trim().length > 0) {
+      // 客户端回传了（可能被编辑过的）交接单，同时用户又在独立输入框里填了下一步：
+      // 把后者写进前者。少了这一步，那个输入框就是白填的——它以前一直是这样。
+      doc = replaceNextStepSection(doc, nextStep)
+    }
     note(`commit: 源会话已读 events=${built.events.length} preset=${header.agentPreset ?? '(none)'} route=${route === null ? '(none)' : `${route.provider}/${route.model}`} finalDocLen=${doc.length}`)
   } catch (error) {
     note(`commit FAIL 读取源会话: ${String(error?.message ?? error)}`)
@@ -701,6 +773,7 @@ async function handleCommit(ctx, resolved, req, res) {
   }
 
   note(`commit ok child=${child.id} mode=${injection.mode} workspace=${workspace}`)
+  rememberInherit(sessionId, child.id)
   sendJson(res, 200, {
     ok: true,
     sessionId: child.id,
@@ -861,6 +934,7 @@ export function apply(ctx, config = {}) {
             }
             renameChild(ctx, child, undefined)
             const injection = await withTimeout(injectDoc(ctx, child, built.doc, startNow), 30_000, '注入交接单')
+            rememberInherit(target, child.id)
             note(`tool: 注入 ${injection.mode}`)
             return [
               `继承完成：新会话 ${child.id}`,
@@ -919,6 +993,7 @@ export function apply(ctx, config = {}) {
             }
             renameChild(ctx, child, undefined)
             const injection = await withTimeout(injectDoc(ctx, child, built.doc, resolved.startByDefault), 30_000, '注入交接单')
+            rememberInherit(target, child.id)
             note(`command: 继承完成 ${target} → ${child.id} mode=${injection.mode}`)
             return {
               kind: 'success',

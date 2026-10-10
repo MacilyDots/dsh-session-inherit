@@ -5,8 +5,9 @@
 // 这样可以在不动真实 DSH 的前提下，把 host 半的问题先挡掉。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 // 离线测试必须把诊断日志写到临时文件。上一轮这些用例的假 session id
 // （session-11111111-…）混进了真实的生产日志，差点被当成用户操作记录误判——
@@ -353,4 +354,65 @@ test('/inherit 支持 --next 指定下一步', async () => {
   const bad = await spec.handler({ rawInput: '修复登录 bug', agent: { session: { id: SESSION_ID } } })
   assert.equal(bad.kind, 'error')
   assert.match(bad.text, /不合法/)
+})
+
+test('客户端回传 doc 时，独立填写的 nextStep 也会写进交接单', async () => {
+  const prompted = []
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: {
+      async create(options) {
+        return { agent: { session: { id: options.sessionId, append() {} } } }
+      },
+    },
+    sessionController: { async prompt(request) { prompted.push(request); return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  })
+  const preview = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
+  assert.equal(preview.status, 200)
+  // 预览里的「下一步」是自动生成的占位文本。
+  assert.match(preview.json.doc, /先问我一句要做什么/)
+
+  const commit = await call(routes.get(COMMIT), 'POST', {
+    sessionId: SESSION_ID,
+    doc: preview.json.doc,
+    nextStep: '先跑一次 npm test',
+    start: true,
+  })
+  assert.equal(commit.status, 200)
+  assert.equal(commit.json.mode, 'prompted')
+  const sent = prompted[0].content[0].text
+  assert.match(sent, /先跑一次 npm test/, '独立输入框的内容必须被写进交接单')
+  assert.ok(!sent.includes('先问我一句要做什么'), '自动生成的占位文本必须被替换掉')
+  assert.match(sent, /把 demo 的武器贴图修一下/, '交接单其余部分不受影响')
+})
+
+test('preview 带出此前的继承记录，commit 后写入新记录', async () => {
+  const historyPath = join(process.env.DSH_HOME, 'session-inherit', 'history.json')
+  mkdirSync(dirname(historyPath), { recursive: true })
+  writeFileSync(historyPath, JSON.stringify({
+    [SESSION_ID]: [{ child: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', at: 1_791_561_308_478 }],
+  }), 'utf8')
+
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: {
+      async create(options) {
+        return { agent: { session: { id: options.sessionId, append() {} } } }
+      },
+    },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  })
+
+  const preview = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
+  assert.equal(preview.status, 200)
+  assert.equal(preview.json.inherited.length, 1, 'preview 必须带出此前的继承记录')
+  assert.equal(preview.json.inherited[0].child, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+
+  const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+  assert.equal(commit.status, 200)
+  const saved = JSON.parse(readFileSync(historyPath, 'utf8'))
+  assert.equal(saved[SESSION_ID].length, 2, 'commit 之后应新增一条记录')
+  assert.equal(saved[SESSION_ID][1].child, commit.json.sessionId)
 })

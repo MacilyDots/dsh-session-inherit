@@ -5,6 +5,7 @@ import {
   collectAnchors,
   composeInheritDoc,
   isInheritDoc,
+  replaceNextStepSection,
   textOfBlocks,
   clip,
   DOC_MARK,
@@ -258,12 +259,36 @@ test('collectAnchors 收集 tool/result 的失败现场并映射回工具名', (
   assert.equal(anchors.failures.length, 1)
   assert.equal(anchors.failures[0].tool, 'edit')
   assert.equal(anchors.failures[0].code, 'FS_STALE_VERSION')
+  assert.equal(anchors.failures[0].turn, 1, '失败要带轮次，否则分不清哪些是陈年旧账')
   assert.match(anchors.failures[0].text, /file changed since it was read/)
   assert.ok(!anchors.failures[0].text.startsWith('Error:'), '开头的 Error: 前缀应被剥掉')
 
   const doc = composeInheritDoc({ sessionId: 'session-x' }, anchors, {})
   assert.match(doc, /## 最近失败/)
-  assert.match(doc, /`edit` FS_STALE_VERSION/)
+  assert.match(doc, /\(t1\) `edit` FS_STALE_VERSION/)
+})
+
+test('replaceNextStepSection 把独立填写的下一步写进交接单', () => {
+  const doc = '📋 会话继承单\n\n## 任务目标\n做 A\n\n## 下一步\n_（未指定：先问我一句要做什么，不要自行展开）_\n'
+  const out = replaceNextStepSection(doc, '读 X:\\work\\a.cs，把 parse 的分支补上')
+  assert.match(out, /## 下一步\n读 X:\\work\\a\.cs，把 parse 的分支补上/)
+  assert.ok(!out.includes('先问我一句要做什么'), '旧的占位文本必须被替换掉')
+  assert.match(out, /## 任务目标\n做 A/, '其他章节不受影响')
+
+  // 空值原样返回（没填就不动）
+  assert.equal(replaceNextStepSection(doc, '   '), doc)
+  assert.equal(replaceNextStepSection(doc, ''), doc)
+
+  // 没有「## 下一步」节时补一节
+  const bare = '📋 会话继承单\n\n## 任务目标\n做 A\n'
+  assert.match(replaceNextStepSection(bare, '做 B'), /## 下一步\n做 B/)
+
+  // 不能把后面的章节吞掉
+  const withTail = '## 下一步\n旧内容\n\n## 源会话最后一次回复\n保留我\n'
+  const tailed = replaceNextStepSection(withTail, '新内容')
+  assert.match(tailed, /## 下一步\n新内容/)
+  assert.ok(!tailed.includes('旧内容'))
+  assert.match(tailed, /## 源会话最后一次回复\n保留我/)
 })
 
 test('collectAnchors 丢掉成功的 tool/result 与用户主动打断', () => {
