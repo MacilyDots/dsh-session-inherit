@@ -1,5 +1,7 @@
 # dsh-session-inherit
 
+[![DSH Market](https://raw.githubusercontent.com/2BingLing/dsh-market/master/assets/readme/badge-listed-en.svg)](https://dsh.market/)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 Hand a long-running session off to a **clean new session**.
@@ -60,36 +62,67 @@ The handoff also hard-codes three rules at the top:
 > 来源：`session-xxx`（标题） · 共 15 轮 · 最后活动 2026-10-08 19:37
 > **执行规则**：不要复述本单…
 
-## 1. 任务目标              ← 源会话第一条真实用户消息
-## 2. 最近的用户指令（由旧到新）  ← source.kind === 'user' 的原话
-## 3. 涉及的文件（绝对路径）      ← 带出现次数，按最近使用排序
-## 4. 项目内相对引用             ← 工具参数里的相对路径片段
-## 5. 最近执行的命令
-## 6. 待办（源会话最后一次 todo 状态）
-## 7. 源会话最后一次回复
-## 8. 下一步                    ← 你在预览框里写
+## 任务目标                    ← the source session's first real user message
+## 改过的文件（实际写入/修改过）  ← from edit/write `file_path`, most recently changed first
+## 最近失败                    ← the source session's last few tool errors (with error codes)
+## 最近的用户指令（由旧到新）     ← verbatim text of `source.kind === 'user'` messages
+## 读过的文件（只读取过，未修改）
+## 文中提到的路径               ← paths scraped out of tool-argument bodies; may be noise
+## 项目内相对引用               ← base directory undetermined; confirm with a file search
+## 最近执行的命令
+## 待办（源会话最后一次 todo 状态）
+## 源会话最后一次回复
+## 下一步                     ← written by you in the preview box
 ```
 
-The document is emitted in Chinese — the block above is its literal output, and the
-plugin does not translate it. Section by section: task statement / recent user
-instructions (oldest first) / files touched (absolute paths, with hit counts, most recent
-first) / in-project relative references / commands run / todo state / the source session's
-last reply / next step (written by you in the preview box).
+The document is emitted in Chinese — the block above is its literal output, and the plugin
+does not translate it. The `←` notes are annotations added here for readability, not part
+of the output.
 
-Section 2 accepts only `source.kind === 'user'`. In one real session, 27 of its 42
-`user/message` events were runtime injections — `agent-instructions` / `runtime-context` /
-`skill-catalog` / `time-context` / memory notices / model selection / compaction
-checkpoints — all noise. They are now kept out.
+Section headings carry **no numbers**. Numbering used to be hard-coded per section and
+drifted whenever a section happened to be empty: the client hint said `## 7. 下一步` while
+the generated document actually contained `## 8.`, so anyone following the hint never found
+the section.
+
+"Recent user instructions" accepts only `source.kind === 'user'`. In one real session, 27 of
+its 42 `user/message` events were runtime injections — `agent-instructions` /
+`runtime-context` / `skill-catalog` / `time-context` / memory notices / model selection /
+compaction checkpoints — all noise. They are now kept out.
+
+### Two high-value anchors
+
+**Files edited** come only from the structured `file_path` of writing tools (`edit` /
+`write`). In one real session: 85 write calls against 58 read calls, touching 17 files
+(writes) versus 43 (reads). Mixed together, read-only files push the actually-edited ones
+past the cap. Paths that merely appear inside a `write` body or an `edit` `new_string` count
+as "mentioned in text" instead.
+
+**Recent failures** come from `tool/result` events with `isError`. In one real session, 11
+of 374 `tool/result` events were failures, e.g.:
+
+```
+[edit] FS_STALE_VERSION：cannot write "…\inject-codex.ps1": file changed since it was read — re-read the file, then retry
+```
+
+That is the most direct clue for "what to do next", and it is extracted mechanically. The
+363 successful ones are dropped, as are user-initiated aborts (`AbortError`) and interrupted
+auto-reviews; identical messages repeated across several tools are merged into one.
+
+Absolute-path anchors also get an existence check: anything already deleted or renamed is
+marked **（已不存在）** (no longer exists), so the new session does not waste its first steps
+looking for it.
 
 ## Usage
+
+### Entry point 1: the session row menu
 
 1. Hover any session in the sidebar and click the "…" at the end of the row.
    **Any session works, including cold ones** — reading goes through
    `sessionQuery.readSession` and does not activate an agent.
 2. Click **Inherit**.
-3. A preview opens: source session info on top (title / turns / files / commands / todos),
-   the editable handoff in the middle, and a checkbox at the bottom.
-4. Under `## 8. 下一步`, write what you want done next — **the more specific the better**
+3. A preview opens: source session info on top (title / turns / files edited / failures /
+   commands / todos), the editable handoff in the middle, and a checkbox at the bottom.
+4. Under `## 下一步`, write what you want done next — **the more specific the better**
    (name the file, name the single action) — then click "创建并继承" (Create and inherit).
 
 The new session opens automatically, titled `继承: <source title>`, with the same working
@@ -99,6 +132,33 @@ The "start working immediately" checkbox is on by default: the handoff is sent t
 `sessionController.prompt` as a normal user message and work begins right away. Unchecked,
 it is written straight into the session log instead (`session:append`) — recorded but not
 triggered, so you can say what to do once you open it.
+
+**Degradations are stated, not swallowed.** If the host could not start the session
+automatically (`prompt` failed or is unavailable), the dialog does not silently close — it
+stays open showing the reason and the new session id, plus an "Open new session" button.
+Previously this path only did `console.warn`, so the dialog vanished and you would assume
+the new session was already running.
+
+### Entry point 2: the `/inherit` command
+
+```
+/inherit                                  inherit the current session
+/inherit <sessionId>                      inherit a specific session
+/inherit --next 先跑一次 npm test          inherit the current session with a first step
+/inherit <sessionId> --next 换个文件继续    both together
+```
+
+Bare text without `--next` can only be a session id; if it is not valid you get an honest
+error instead of a guess at what you meant by "next step".
+
+### Entry point 3: the `session_inherit` tool
+
+The same operation exposed to the agent, with parameters `sessionId` (required),
+`nextStep`, and `start`. This lets an agent propose a session switch on its own when its
+context grows long, or lets you express the intent through the agent.
+
+All three entry points funnel into one path: read the source session → mechanical
+extraction → create the session → attach the workspace → inject the handoff.
 
 ## Installation
 
@@ -174,17 +234,33 @@ Override in the profile's `cordis.patch.yml` (all optional):
   Leave it blank and the model will ask first — deliberately.
 - If the source session's first user message is a short greeting or preamble, it appears
   verbatim as the "task statement".
-- Project paths containing spaces are captured in full; fragments with non-ASCII
-  punctuation such as `§` are dropped.
-- The handoff is capped at 14,000 characters and truncated beyond that (a real long
-  session measured roughly 4,500 characters).
+- **Paths whose last segment contains spaces depend on boundary detection.** Path parsing
+  has three routes, ordered by reliability: (1) a tool's structured parameter (`read` /
+  `grep` `path`) is a whole path on its own — most reliable; (2) anything wrapped in
+  quotes or backticks has an explicit boundary; (3) the rest is scraped by regex, whose
+  final segment may not contain whitespace (otherwise it would swallow the following
+  sentence). So a path embedded directly in prose and followed by more words
+  (`B:\Demo\CROOKED HALO The False Paradise_Demo 这个项目`) gets truncated to
+  `B:\Demo\CROOKED`. In one real session about 4 such fragments survived, all inside the
+  "paths mentioned in text" section, which is labelled as possibly noise.
+- Two paths joined by a space on one line used to merge into one. That is now blocked by
+  forbidding a drive-letter colon inside a path segment (`copy B:\p\a.cs B:\p\b.cs`); CJK
+  punctuation (`，。；：、！？（）【】《》`) is also treated as a separator.
+- The handoff is capped at 14,000 characters. **Beyond that, whole sections are dropped in
+  priority order** ("paths mentioned in text" → "files read" → "in-project relative
+  references" → "commands run" → "last reply" → "todos" → "recent user instructions" →
+  "files edited"); "next step / task statement / files edited / recent failures" are never
+  dropped. A real long session measured roughly 4,000–6,500 characters, far below the cap.
+- If the source session was compacted (`compaction/*` events), the handoff says so — after
+  a compaction the earlier original text is no longer in the log, so mechanical extraction
+  cannot reach it either.
 
 ## Tests
 
 ```sh
-node test/extract.test.mjs   # extractor pure functions (13)
-node test/host.test.mjs      # host half: endpoint registration and the full preview/commit path against a fake ctx (10)
-node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → confirm → commit (4)
+node test/extract.test.mjs   # extractor pure functions (25)
+node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, and /inherit argument parsing against a fake ctx (12)
+node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → confirm → commit (5)
 ```
 
 ## Relation to existing plugins
