@@ -240,11 +240,11 @@ Override in the profile's `cordis.patch.yml` (all optional):
   quotes or backticks has an explicit boundary; (3) the rest is scraped by regex, whose
   final segment may not contain whitespace (otherwise it would swallow the following
   sentence). So a path embedded directly in prose and followed by more words
-  (`B:\Demo\CROOKED HALO The False Paradise_Demo 这个项目`) gets truncated to
-  `B:\Demo\CROOKED`. In one real session about 4 such fragments survived, all inside the
+  (`X:\work\My Project Name 这个项目`) gets truncated to
+  `X:\work\My Project`. In one real session about 4 such fragments survived, all inside the
   "paths mentioned in text" section, which is labelled as possibly noise.
 - Two paths joined by a space on one line used to merge into one. That is now blocked by
-  forbidding a drive-letter colon inside a path segment (`copy B:\p\a.cs B:\p\b.cs`); CJK
+  forbidding a drive-letter colon inside a path segment (`copy X:\p\a.cs X:\p\b.cs`); CJK
   punctuation (`，。；：、！？（）【】《》`) is also treated as a separator.
 - The handoff is capped at 14,000 characters. **Beyond that, whole sections are dropped in
   priority order** ("paths mentioned in text" → "files read" → "in-project relative
