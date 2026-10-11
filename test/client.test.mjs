@@ -333,13 +333,13 @@ test('点「创建并继承」必须真的发出 commit 请求（回归：未声
     assert.ok(nextStepBox !== undefined, '缺少「下一步」独立输入框')
     nextStepBox.props.onChange({ target: { value: '先跑 npm test' } })
 
-    // 3.4) 「继承原对话预设」勾选框必须存在且**默认勾选**：源会话是什么预设，新会话
-    //      就继承什么（含虚拟空间/酒馆人格），这个值还要随 commit 发出去。
+    // 3.4) 「继承当前对话的预设」勾选框必须存在且**默认勾选**：当前对话是什么预设，新会话
+    //      就继承什么，这个值还要随 commit 发出去。
     const inheritLabel = expanded.find((node) => node.type === 'label'
-      && Array.isArray(node.children) && node.children.some((c) => typeof c === 'string' && c.includes('继承原对话的预设')))
-    assert.ok(inheritLabel !== undefined, '缺少「继承原对话预设」勾选框')
+      && Array.isArray(node.children) && node.children.some((c) => typeof c === 'string' && c.includes('继承当前对话的预设')))
+    assert.ok(inheritLabel !== undefined, '缺少「继承当前对话的预设」勾选框')
     const inheritBox = inheritLabel.children.find((c) => c !== null && typeof c === 'object' && c.type === 'input')
-    assert.equal(inheritBox.props.checked, true, '「继承原对话预设」必须默认勾选')
+    assert.equal(inheritBox.props.checked, true, '「继承当前对话的预设」必须默认勾选')
 
     const confirmButton = collect(harness.render(dialogComponent))
       .find((node) => node.type === 'button' && node.children[0] === '创建并继承')

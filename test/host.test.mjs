@@ -460,14 +460,14 @@ test('session_read 工具：summary / tail / search 三种模式', async () => {
   assert.match(bad, /不合法/)
 })
 
-// 虚拟空间/酒馆类预设的人格绑定**不在**会话 header 里（那里永远是 standard），
-// 而在宿主的 `.agent-presets/session-bindings.json`。继承时必须读出来并绑到新会话上，
-// 否则新会话拿不到人格——这是用户实测发现的问题（源会话标题「开始」）。
-// 绑定必须在会话空白时做：tavern 里写着"已开始的会话 agent 预设本体被 DSH 锁定"。
-test('继承时把源会话的虚拟空间绑定复制到新会话', async () => {
+// 自定义预设的绑定**不一定**在会话 header 里（那里可能永远是 standard），
+// 也可能在宿主的 `.agent-presets/session-bindings.json`。继承时必须读出来并挂到新会话上，
+// 否则新会话拿不到那个人格——这是用户实测发现的问题（源会话标题「开始」）。
+// 挂载必须在会话创建时做：会话一旦开始，agent 预设本体就被 DSH 锁定了。
+test('继承时把源会话的预设绑定复制到新会话', async () => {
   const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
   mkdirSync(dirname(bindingsPath), { recursive: true })
-  writeFileSync(bindingsPath, JSON.stringify({ [SESSION_ID]: 'preset-mty5odkp-ka272v' }))
+  writeFileSync(bindingsPath, JSON.stringify({ [SESSION_ID]: 'preset-demo-0001' }))
 
   const handlers = new Map()
   const calls = []
@@ -504,18 +504,18 @@ test('继承时把源会话的虚拟空间绑定复制到新会话', async () =>
 
     const commit = await call(handlers.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
     assert.equal(commit.status, 200)
-    // 1) 真正的人格继承发生在**会话创建时**：meta.agentPreset 必须是虚拟空间绑定值，
-    //    不是 header 里的 standard。tavern 那个 HTTP 接口换不了 DSH 的预设。
+    // 1) 真正的人格继承发生在**会话创建时**：meta.agentPreset 必须是绑定值，
+    //    不是 header 里的 standard。那个预设插件的 HTTP 接口换不了 DSH 的预设。
     assert.equal(created.length, 1)
-    assert.equal(created[0].meta.agentPreset, 'preset-mty5odkp-ka272v')
-    assert.deepEqual(mounted, ['preset-mty5odkp-ka272v'], '必须真的把该预设挂到新会话上')
-    // 2) 同时登记进 tavern 账本，让酒馆面板显示得对。
-    assert.equal(calls.length, 1, '应该正好调一次 tavern 绑定接口')
+    assert.equal(created[0].meta.agentPreset, 'preset-demo-0001')
+    assert.deepEqual(mounted, ['preset-demo-0001'], '必须真的把该预设挂到新会话上')
+    // 2) 同时登记进那个预设插件的账本，让它的面板显示得对。
+    assert.equal(calls.length, 1, '应该正好调一次预设绑定接口')
     assert.match(calls[0].url, /\/api\/tavern\/bind-preset$/)
-    assert.equal(calls[0].body.presetId, 'preset-mty5odkp-ka272v', '要绑的是源会话的绑定值，不是 header 里的 standard')
+    assert.equal(calls[0].body.presetId, 'preset-demo-0001', '要绑的是源会话的绑定值，不是 header 里的 standard')
     assert.equal(calls[0].body.sessionId, commit.json.sessionId, '要登记到新建的那个会话上')
     // 3) 宿主如实回报实际结果，页脚也写成事实（而不是"打算继承"）。
-    assert.equal(commit.json.preset, 'preset-mty5odkp-ka272v')
+    assert.equal(commit.json.preset, 'preset-demo-0001')
     assert.equal(commit.json.presetInherited, true)
     assert.match(JSON.stringify(appended[0]), /新会话已继承该预设/, '页脚必须写明已继承')
   } finally {
@@ -525,8 +525,8 @@ test('继承时把源会话的虚拟空间绑定复制到新会话', async () =>
   }
 })
 
-// 没有绑定（没装酒馆类插件）时不能凭空去调接口。
-test('源会话没有虚拟空间绑定时不调 tavern 接口', async () => {
+// 没有绑定（没装那类预设插件）时不能凭空去调接口。
+test('源会话没有预设绑定时不调绑定接口', async () => {
   const handlers = new Map()
   const calls = []
   const originalFetch = globalThis.fetch
@@ -555,11 +555,11 @@ test('源会话没有虚拟空间绑定时不调 tavern 接口', async () => {
 })
 
 // 用户取消勾选「继承原对话预设」时：新会话用 DSH 默认预设（不传 agentPreset），
-// 也不该往 tavern 账本里登记——账本说绑了、DSH 侧却没绑，比不登记更误导。
-test('取消勾选继承预设时用默认预设，且不登记 tavern 账本', async () => {
+// 也不该往那个预设插件的账本里登记——账本说绑了、DSH 侧却没绑，比不登记更误导。
+test('取消勾选继承预设时用默认预设，且不登记绑定账本', async () => {
   const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
   mkdirSync(dirname(bindingsPath), { recursive: true })
-  writeFileSync(bindingsPath, JSON.stringify({ [SESSION_ID]: 'preset-mty5odkp-ka272v' }))
+  writeFileSync(bindingsPath, JSON.stringify({ [SESSION_ID]: 'preset-demo-0001' }))
 
   const handlers = new Map()
   const calls = []
@@ -586,7 +586,7 @@ test('取消勾选继承预设时用默认预设，且不登记 tavern 账本', 
     const commit = await call(handlers.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false, inheritPreset: false })
     assert.equal(commit.status, 200)
     assert.equal(created[0].meta.agentPreset, undefined, '取消勾选时不该把源预设写进新会话')
-    assert.equal(calls.length, 0, '取消勾选时不该登记 tavern 账本')
+    assert.equal(calls.length, 0, '取消勾选时不该登记绑定账本')
     assert.equal(commit.json.preset, null)
     assert.equal(commit.json.presetInherited, false)
     assert.match(JSON.stringify(appended[0]), /本次未继承/, '页脚必须写明这次没继承')

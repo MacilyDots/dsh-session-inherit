@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
       'dialog.docHide': '收起交接单',
       'dialog.inherited': '这个会话已经被继承过 {count} 次，最近一次 {time} → {child}',
       'dialog.start': '创建后立即开始工作（取消勾选则只写入交接单，打开新会话后可以自己选预设再开始）',
-      'dialog.inheritPreset': '继承原对话的预设（含虚拟空间/酒馆人格；取消勾选则新会话用默认预设）',
+      'dialog.inheritPreset': '继承当前对话的预设（取消勾选则新会话用默认预设）',
       'dialog.presetInherited': '已挂到新会话的预设：',
       'dialog.presetFailed': '预设没挂上，新会话仍是默认预设：',
       'dialog.cancel': '取消',
@@ -77,7 +77,7 @@ window.__ModuleLoader__.load({
       'dialog.docHide': 'Hide the handoff',
       'dialog.inherited': 'This session has been inherited {count} time(s); most recently {time} → {child}',
       'dialog.start': 'Start working immediately (uncheck to only write the handoff — you can pick a preset when you open it)',
-      'dialog.inheritPreset': "Inherit the source session's preset (tavern/roleplay persona included; uncheck to use the default preset)",
+      'dialog.inheritPreset': "Inherit the current session's preset (uncheck to use the default preset)",
       'dialog.presetInherited': 'Preset mounted on the new session: ',
       'dialog.presetFailed': 'Preset not mounted — the new session keeps the default: ',
       'dialog.cancel': 'Cancel',
@@ -288,7 +288,7 @@ window.__ModuleLoader__.load({
       var startPair = React.useState(true)
       var start = startPair[0]
       var setStart = startPair[1]
-      // 默认勾选：源会话是什么预设，新会话就继承什么（含虚拟空间/酒馆人格）。
+      // 默认勾选：当前对话是什么预设，新会话就继承什么。
       var inheritPresetPair = React.useState(true)
       var inheritPreset = inheritPresetPair[0]
       var setInheritPreset = inheritPresetPair[1]
@@ -352,7 +352,7 @@ window.__ModuleLoader__.load({
             // 交接单正文语言跟随界面语言：英文界面下不该注入一份中文正文。
             lang: fallbackLang(),
             start: start,
-            // 默认勾选：继承源会话的预设（含虚拟空间/酒馆绑定）。
+            // 默认勾选：继承当前对话的预设。
             inheritPreset: inheritPreset,
           }),
           signal: abort.signal,
@@ -466,7 +466,7 @@ window.__ModuleLoader__.load({
             wordBreak: 'break-all',
           },
         }, String(detail.sessionId)))
-        // 有虚拟空间/酒馆绑定时才多说一句：新会话到底挂上了没有。
+        // 有继承到预设时才多说一句：新会话到底挂上了没有。
         if (typeof detail.preset === 'string' && detail.preset.length > 0) {
           body.push(h('div', {
             key: 'donePreset',

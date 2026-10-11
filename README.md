@@ -301,21 +301,23 @@ Override in the profile's `cordis.patch.yml` (all optional):
 - If the source session was compacted (`compaction/*` events), the handoff says so — after
   a compaction the earlier original text is no longer in the log, so mechanical extraction
   cannot reach it either.
-- **A tavern/virtual-space persona binding is carried over by default.** Those presets do
-  **not** touch the session header's `agentPreset` (it stays `standard`); the real persona
-  binding lives in the host's `%DSH_HOME%\.agent-presets\session-bindings.json`, shaped like
-  `{"session-xxx": "preset-mty5odkp-ka272v"}`. The dialog has an **"Inherit the source
-  session's preset"** checkbox, checked by default: with it on, the plugin passes that preset
-  id as the new session's `agentPreset` **at creation time**, so the new session really starts
-  with the persona. Uncheck it and the new session uses the default preset instead. The
-  handoff footer records the actual outcome — `Tavern binding: preset-… → inherited by the new
-  session`, or `not inherited this time` / `mount failed`.
-- **`POST /api/tavern/bind-preset` is not what performs the inheritance.** That endpoint only
-  writes the tavern plugin's own bindings ledger; its source comment says switching the agent
-  preset is the chat preset picker's job. The plugin still calls it so that ledger stays
-  consistent, but the real inheritance goes through the host's `agentPresets` service while
-  the session is being created. Getting this backwards was the bug that made an earlier
-  version print a binding in the footer while the new session had no persona at all.
+- **The custom preset a session actually uses is carried over by default.** Some presets (third
+  party roleplay ones, for instance) do **not** touch the session header's `agentPreset` (it may
+  stay `standard`); the preset that actually applies is recorded in the host's
+  `%DSH_HOME%\.agent-presets\session-bindings.json`, shaped like
+  `{"session-xxx": "preset-xxxxxxxx"}`. The dialog has an **"Inherit the current session's
+  preset"** checkbox, checked by default: with it on, the plugin passes that preset id as the
+  new session's `agentPreset` **at creation time**, so the new session really starts with that
+  preset. Uncheck it and the new session uses the default preset instead. The handoff footer
+  records the actual outcome — `Preset: preset-… → inherited by the new session`, or
+  `not inherited this time` / `mount failed`.
+- **An HTTP endpoint of some preset plugin is not what performs the inheritance.** For example
+  `dsh-tavern`'s `POST /api/tavern/bind-preset` only writes that plugin's own bindings ledger;
+  its source comment says switching the agent preset is the chat preset picker's job. The plugin
+  still calls it so the ledger stays consistent, but the real inheritance goes through the
+  host's `agentPresets` service while the session is being created. Getting this backwards was
+  the bug that made an earlier version print a preset in the footer while the new session had
+  no persona at all.
 
 ## Tests
 

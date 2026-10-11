@@ -323,7 +323,7 @@ async function createChild(ctx, input) {
   const sourceHeader = input.header !== null && typeof input.header === 'object' ? input.header : {}
   // presetOverride 三态：不传 = 沿用源会话 header 的预设（工具/命令通路的老行为）；
   // `null` = 这次不继承、用 DSH 默认预设；非空字符串 = 用这个 preset id。
-  // 虚拟空间/酒馆预设**只能**在会话创建时经由这里设置：tavern 的
+  // 自定义预设**只能**在会话创建时经由这里设置：某些预设插件的
   // `/api/tavern/bind-preset` 只写它自己的账本，不切换 DSH 的 agent preset。
   const override = input.presetOverride
   const wantedPreset = override === null
@@ -365,7 +365,7 @@ async function createChild(ctx, input) {
   })
   const session = handle?.agent?.session
   if (session === undefined || session === null) throw new Error('agents.create 未返回会话')
-  // 把绑定登记到 tavern 的账本，让酒馆面板显示得对。必须在会话还是空白时做（tavern
+  // 把绑定登记到那个预设插件的账本，让它的面板显示得对。必须在会话还是空白时做（tavern
   // 判定"已开始"就看有没有 user 消息）。放在 createChild 内部，三条入口自动覆盖。
   // 用户取消勾选「继承原对话预设」时（presetOverride === null）不登记：账本上写着绑了、
   // DSH 侧却没绑，比不登记更误导。
@@ -685,16 +685,16 @@ function readInheritedBy(sessionId) {
 }
 
 /**
- * 把源会话的虚拟空间（酒馆）预设绑定**登记**到新会话。
+ * 把源会话的预设绑定**登记**到新会话。
  *
  * 这个函数**不负责**让新会话真正用上那个预设。`/api/tavern/bind-preset` 只写 tavern
  * 自己的 `session-bindings.json`（源码注释原话：「不再直接写入 DSH 会话文件……真正
  * 切换 agent 预设请用聊天顶部选择器」），DSH 侧的 agent preset 一个字节都不会变。
  * 真正继承人格靠 `createChild` 在**创建时**把 presetId 当 agentPreset 传进去。
  *
- * 那为什么还留着：让 tavern 的账本和 DSH 保持一致，否则酒馆面板里这个新会话显示的
+ * 那为什么还留着：让那个预设插件的账本和 DSH 保持一致，否则它的面板里这个新会话显示的
  * 仍是上一个预设，用户会以为继承没生效。历史上这里被当成"继承预设"的**全部**实现，
- * 于是有了"交接单写着虚拟空间绑定、新会话却没有人格"这个问题。
+ * 于是有了"交接单写着绑定了预设、新会话却没有人格"这个问题。
  *
  * 时机：必须在注入交接单**之前**调用——那时新会话还没有 user 消息，tavern 判定未开始。
  *
@@ -731,11 +731,11 @@ async function copyTavernBinding(ctx, sourceId, childId) {
 }
 
 /**
- * 读宿主侧「会话 → 虚拟空间/酒馆预设」的绑定。
+ * 读宿主侧「会话 → 自定义预设」的绑定。
  *
- * 虚拟空间类预设**不改**会话 header 的 `agentPreset`（那里永远是 standard），真正的人格
+ * 这类预设**不改**会话 header 的 `agentPreset`（那里永远是 standard），真正的人格
  * 绑定记在 `%DSH_HOME%\.agent-presets\session-bindings.json` 里，形如
- * `{ "session-xxx": "preset-mty5odkp-ka272v" }`。继承时只读 header 会漏掉它，新会话就
+ * `{ "session-xxx": "preset-xxxxxxxx" }`。继承时只读 header 会漏掉它，新会话就
  * 丢了人格——所以把绑定也捞出来写进交接单，让用户知道新会话该选哪个。
  * 文件不存在（没装那类插件）时静默返回 undefined，不影响主流程。
  * @param {string} sessionId - 源会话 id。
@@ -794,7 +794,7 @@ async function buildDoc(ctx, input) {
   const anchors = collectAnchors(snapshot.events, { recentUsers: input.recentUsers })
   markMissingFiles(anchors)
   const route = resolveRoute(ctx, snapshot.events)
-  // 虚拟空间类预设不写进 header，绑定在宿主的 session-bindings.json 里，单独捞。
+  // 这类预设不写进 header，绑定在宿主的 session-bindings.json 里，单独捞。
   // 这个值不只是给页脚看的——它是新会话真正要挂的那个人格（见 createChild 的
   // presetOverride），所以必须一路带到 commit。
   const boundPreset = readBoundPreset(input.sessionId)
@@ -878,7 +878,7 @@ async function handlePreview(ctx, resolved, req, res) {
         inheritedCount: built.anchors.inheritedCount,
       },
       route: built.route,
-      // 有没有虚拟空间/酒馆绑定：界面据此决定要不要提「继承原对话预设」这件事。
+      // 有没有自定义预设绑定：界面据此决定要不要提「继承当前对话的预设」这件事。
       boundPreset: built.boundPreset ?? null,
       // 这个会话以前被继承过几次：在用户即将再次继承时提示，防止重复继承。
       inherited: readInheritedBy(sessionId),
@@ -921,7 +921,7 @@ async function handleCommit(ctx, resolved, req, res) {
   const title = typeof args?.title === 'string' ? args.title : undefined
   const start = typeof args?.start === 'boolean' ? args.start : resolved.startByDefault
   const nextStep = typeof args?.nextStep === 'string' ? args.nextStep : undefined
-  // 默认继承源会话的预设（虚拟空间/酒馆绑定也算）；用户取消勾选时用 DSH 默认预设。
+  // 默认继承源会话的预设（自定义预设绑定也算）；用户取消勾选时用 DSH 默认预设。
   const inheritPreset = typeof args?.inheritPreset === 'boolean' ? args.inheritPreset : true
   const lang = typeof args?.lang === 'string' ? args.lang : undefined
 
@@ -965,7 +965,7 @@ async function handleCommit(ctx, resolved, req, res) {
     return
   }
 
-  // 要挂给新会话的预设：勾选继承时优先用源会话的虚拟空间绑定（没有绑定就沿用 header
+  // 要挂给新会话的预设：勾选继承时优先用源会话的绑定值（没有绑定就沿用 header
   // 的预设）；取消勾选传 null，让 DSH 用默认预设。
   const presetOverride = inheritPreset
     ? (typeof boundPreset === 'string' && boundPreset.length > 0 ? boundPreset : undefined)
@@ -1001,7 +1001,7 @@ async function handleCommit(ctx, resolved, req, res) {
 
   renameChild(ctx, child, title)
 
-  // 页脚那句「虚拟空间绑定」必须写成事实：preview 发生在用户勾选之前，只有这里拿到
+  // 页脚那句「预设」必须写成事实：preview 发生在用户勾选之前，只有这里拿到
   // 挂载结果才谈得上如实（上一版页脚在说一件接口根本没做的事）。
   if (typeof boundPreset === 'string' && boundPreset.length > 0) {
     doc = annotatePresetLine(doc, { lang, inheritPreset, mounted: presetReport.mounted === true })

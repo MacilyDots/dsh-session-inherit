@@ -553,45 +553,44 @@ test('replaceNextStepSection 认得英文交接单的 Next step 节', () => {
   assert.match(out, /## Task\nA/)
 })
 
-// 虚拟空间/酒馆类预设**不改**会话 header 的 agentPreset（那里永远是 standard），
-// 真正的人格绑定记在宿主的 session-bindings.json 里。两个都要写出来，否则用户
-// 拿到新会话时不知道该选哪个预设，人格就静默丢了。
-test('交接单页脚同时写明预设与虚拟空间绑定', () => {
+// 自定义预设**不一定**改会话 header 的 agentPreset（那里可能永远是 standard），
+// 真正生效的预设记在宿主的 session-bindings.json 里。页脚只写一个「预设」字段，
+// 值取真正生效的那个——写两行（standard + 绑定）新会话读着自相矛盾。
+test('交接单页脚只写当前生效的预设', () => {
   const anchors = collectAnchors([])
   const doc = composeInheritDoc({
     sessionId: 'session-x',
     cwd: 'X:\\work\\demo',
     model: 'p/m',
     agentPreset: 'standard',
-    boundPreset: 'preset-mty5odkp-ka272v',
+    boundPreset: 'preset-demo-0001',
   }, anchors, {})
-  assert.match(doc, /预设：standard/)
-  assert.match(doc, /虚拟空间绑定：preset-mty5odkp-ka272v/)
+  // 有绑定时写绑定值，而不是 header 里的 standard。
+  assert.match(doc, /预设：preset-demo-0001/)
+  assert.ok(!doc.includes('预设：standard'), '有绑定时不该再写 header 的 standard')
 
-  // 没有绑定时不该凭空出现这一节
+  // 没有绑定时回落到 header 的值。
   const plain = composeInheritDoc({ sessionId: 'session-x', cwd: 'X:\\work\\demo', agentPreset: 'standard' }, anchors, {})
-  assert.ok(!plain.includes('虚拟空间绑定'))
   assert.match(plain, /预设：standard/)
 
-  // 英文版同样
+  // 英文版同样。
   const en = composeInheritDoc({
     sessionId: 'session-x',
     cwd: 'X:\\work\\demo',
     agentPreset: 'standard',
-    boundPreset: 'preset-mty5odkp-ka272v',
+    boundPreset: 'preset-demo-0001',
   }, anchors, { lang: 'en' })
-  assert.match(en, /Preset: standard/)
-  assert.match(en, /Tavern binding: preset-mty5odkp-ka272v/)
+  assert.match(en, /Preset: preset-demo-0001/)
 })
 
-// 页脚那句「虚拟空间绑定」必须写成**事实**：preview 发生在用户勾选之前，只有 commit
-// 拿到挂载结果后才谈得上如实。上一版页脚写的是"打算继承"，而它依赖的 tavern 接口
+// 页脚那句「预设」必须写成**事实**：preview 发生在用户勾选之前，只有 commit
+// 拿到挂载结果后才谈得上如实。上一版页脚写的是"打算继承"，而它依赖的那个接口
 // 根本不切换 DSH 预设——于是出现了"交接单说绑了、新会话却没有人物人格"。
 test('annotatePresetLine 按实际结果把页脚写成事实', () => {
-  const doc = '---\n工作目录：`X:\\work\\demo` · 预设：standard · 虚拟空间绑定：preset-mty5odkp-ka272v\n> 页脚\n'
+  const doc = '---\n工作目录：`X:\\work\\demo` · 预设：preset-demo-0001\n> 页脚\n'
 
   const inherited = annotatePresetLine(doc, { inheritPreset: true, mounted: true })
-  assert.match(inherited, /虚拟空间绑定：preset-mty5odkp-ka272v → 新会话已继承该预设/)
+  assert.match(inherited, /预设：preset-demo-0001 → 新会话已继承该预设/)
 
   assert.match(annotatePresetLine(doc, { inheritPreset: false, mounted: false }), /本次未继承/)
   assert.match(annotatePresetLine(doc, { inheritPreset: true, mounted: false }), /挂载失败/)
@@ -599,11 +598,11 @@ test('annotatePresetLine 按实际结果把页脚写成事实', () => {
   // 幂等：同一份 doc 重复调用不会把后缀叠起来。
   assert.equal(annotatePresetLine(inherited, { inheritPreset: true, mounted: true }), inherited)
 
-  // 源会话本来就没有虚拟空间绑定：不该凭空多出一句话。
-  const plain = '---\n工作目录：`X:\\work\\demo` · 预设：standard\n'
+  // 页脚里根本没有「预设」字段（连 header 的预设都没有）：不该凭空多出一句话。
+  const plain = '---\n工作目录：`X:\\work\\demo`\n'
   assert.equal(annotatePresetLine(plain, { inheritPreset: true, mounted: true }), plain)
 
   // 英文交接单同样认。
-  const en = annotatePresetLine('---\nWorking directory: `X:\\work\\demo` · Tavern binding: preset-x\n', { lang: 'en', inheritPreset: true, mounted: true })
+  const en = annotatePresetLine('---\nWorking directory: `X:\\work\\demo` · Preset: preset-demo-0001\n', { lang: 'en', inheritPreset: true, mounted: true })
   assert.match(en, /inherited by the new session/)
 })
