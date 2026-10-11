@@ -1,0 +1,6 @@
+# dsh-session-inherit bundle patch: one insert row activating the plugin.
+# 宿主半注册 /__session-inherit/preview 与 /__session-inherit/commit；
+# 客户端半往会话行「…」菜单加一行「继承」。
+- insert:
+    - id: session-inherit
+      name: 'dsh-session-inherit'
