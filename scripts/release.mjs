@@ -12,9 +12,13 @@
  *   node scripts/release.mjs --tag v1.2.3  显式指定 tag（必须与 package.json 版本一致）
  *
  * 前置：改动已 commit 并 push、tag 已推到远端（脚本不碰 git，避免误操作），gh 已登录。
+ *
+ * 实现说明：Windows 上 npm / gh 都是 .cmd，Node 必须经 shell 才能执行它们；而
+ * `shell: true` + 参数**数组**的组合已被 Node 弃用（DEP0190，参数不转义）。所以这里
+ * 统一用 execSync 传整条命令字符串，路径一律加双引号（cmd 的引号规则）。
  */
 
-import { execFileSync } from 'node:child_process'
+import { execSync } from 'node:child_process'
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -39,21 +43,23 @@ if (tag !== `v${pkg.version}`) {
   process.exit(1)
 }
 
-/** 跑外部命令，输出直通终端。Windows 上 npm/gh 是 .cmd，所以要 shell。 */
-const run = (cmd, cmdArgs, opts = {}) =>
-  execFileSync(cmd, cmdArgs, { cwd: ROOT, stdio: 'inherit', shell: true, ...opts })
+/** 跑一条命令，输出直通终端。 */
+const run = (cmd, opts = {}) => execSync(cmd, { cwd: ROOT, stdio: 'inherit', ...opts })
+
+/** 跑一条命令并把 stdout 当字符串收回来。 */
+const capture = (cmd) => execSync(cmd, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 
 console.log(`${NAME} ${tag}  →  ${REPO}`)
 
 if (dryRun) {
-  run('npm', ['pack', '--dry-run'])
+  run('npm pack --dry-run')
   console.log('\n--dry-run：没有打包、没有上传。')
   process.exit(0)
 }
 
 const tmp = mkdtempSync(join(tmpdir(), 'dsh-release-'))
 try {
-  run('npm', ['pack', '--pack-destination', tmp])
+  run(`npm pack --pack-destination "${tmp}"`)
   const versioned = join(tmp, `${NAME}-${pkg.version}.tgz`)
   // 固定名那份是给 latest URL 用的：附件名不带版本，换版本也不用改市场里的安装命令。
   const fixed = join(tmp, `${NAME}.tgz`)
@@ -64,7 +70,7 @@ try {
 
   let exists = true
   try {
-    execFileSync('gh', ['release', 'view', tag, '--repo', REPO], { stdio: 'ignore', shell: true })
+    execSync(`gh release view "${tag}" --repo "${REPO}"`, { cwd: ROOT, stdio: 'ignore' })
   } catch {
     exists = false
   }
@@ -73,18 +79,12 @@ try {
     console.log(`\nRelease ${tag} 已存在，补传附件。`)
   } else {
     console.log(`\nRelease ${tag} 不存在，创建。`)
-    run('gh', ['release', 'create', tag, '--repo', REPO, '--title', tag, '--generate-notes', versioned])
+    run(`gh release create "${tag}" --repo "${REPO}" --title "${tag}" --generate-notes "${versioned}"`)
   }
   // 固定名那份每次都要在：latest URL 认的就是它。
-  run('gh', ['release', 'upload', tag, '--repo', REPO, '--clobber', fixed])
+  run(`gh release upload "${tag}" --repo "${REPO}" --clobber "${fixed}"`)
 
-  const listed = JSON.parse(
-    execFileSync('gh', ['release', 'view', tag, '--repo', REPO, '--json', 'assets'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-      shell: true,
-    }),
-  )
+  const listed = JSON.parse(capture(`gh release view "${tag}" --repo "${REPO}" --json assets`))
   console.log(`\nRelease ${tag} 的附件：`)
   for (const asset of listed.assets) console.log(`  ${asset.name}  ${asset.size}  ${asset.state}`)
   console.log('\n✓ 完成。固定名附件的永久地址（市场里的安装命令就用它）：')
