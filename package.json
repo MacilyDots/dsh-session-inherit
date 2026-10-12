@@ -28,7 +28,7 @@
     "continue"
   ],
   "license": "MIT",
-  "author": "MacilyDots",
+  "author": "MacilyDots <maicly@foxmail.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MacilyDots/dsh-session-inherit.git"
