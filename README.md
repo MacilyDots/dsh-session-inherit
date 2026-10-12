@@ -213,8 +213,14 @@ It reads only; it never creates or modifies anything.
 
 ## Installation
 
-Not published to npm; install it straight from the repository. Edit the profile's
-`package.json` — both places:
+From npm (recommended, one command):
+
+```sh
+dsh plugin --profile <profile> add dsh-session-inherit
+```
+
+Or straight from the repository, without npm. Edit the profile's `package.json` — both
+places:
 
 ```json
 {
