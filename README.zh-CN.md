@@ -292,6 +292,26 @@ node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/
 node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（5）
 ```
 
+## 发布
+
+每次发版要**同时**传两个附件：
+
+- `dsh-session-inherit-<版本>.tgz` —— 留档
+- `dsh-session-inherit.tgz` —— **固定名**
+
+固定名那个是给 `releases/latest/download/dsh-session-inherit.tgz` 用的。`latest` 指向
+**最新那个 Release**，附件名不带版本，市场里写好的安装命令才不会随发版失效——少传它，
+那个 URL 下次发版就是 404。
+
+```sh
+npm test                  # 1) 改完代码，跑测试
+# 2) bump 版本 → 提交推送 → 打 tag（脚本会校验 tag 与 package.json 的版本一致）
+node scripts/release.mjs  # 3) 打包 + 建 Release + 传两个附件
+```
+
+`--dry-run` 只列包内容、不打包不上传；`--tag v1.2.3` 显式指定 tag。脚本不碰 git——
+提交和打 tag 仍由你手动做，它只管打包与上传。
+
 ## 与已有插件的关系
 
 写之前查过现成的方案，没有完全重合的：

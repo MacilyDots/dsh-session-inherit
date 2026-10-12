@@ -329,6 +329,28 @@ node test/host.test.mjs      # host half: endpoint registration, the full previe
 node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (5)
 ```
 
+## Releasing
+
+Every release must carry **two** assets:
+
+- `dsh-session-inherit-<version>.tgz` — the archived build
+- `dsh-session-inherit.tgz` — the **fixed-name** one
+
+The fixed name is what `releases/latest/download/dsh-session-inherit.tgz` resolves to.
+`latest` points at the **most recent Release**, so keeping the asset name version-free is
+what stops the install command printed in plugin marketplaces from breaking on every bump —
+forget it and that URL 404s on the next release.
+
+```sh
+npm test                  # 1) run the tests
+# 2) bump the version → commit & push → push the tag (the script checks it matches package.json)
+node scripts/release.mjs  # 3) pack, create the Release, upload both assets
+```
+
+`--dry-run` lists the package contents without packing or uploading; `--tag v1.2.3` picks
+the tag explicitly. The script never touches git — committing and tagging stay manual, it
+only packs and uploads.
+
 ## Relation to existing plugins
 
 Existing options were surveyed before writing this; none overlaps completely:
