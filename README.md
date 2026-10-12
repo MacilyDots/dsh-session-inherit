@@ -125,15 +125,17 @@ looking for it.
 2. Click **Inherit**.
 3. A preview opens, top to bottom: source session info (title / turns / files edited /
    failures / commands / todos) → a **"Next step" input box** (optional) → the
-   "start working immediately" checkbox → the handoff, collapsed into a single row.
+   "start working immediately" checkbox → the "inherit the current session's preset"
+   checkbox → the handoff, collapsed into a single row.
 4. Write what you want done next in that box — **the more specific the better**
-   (name the file, name the single action) — then click "创建并继承" (Create and inherit).
+   (name the file, name the single action) — then click "Create and inherit".
    To edit the handoff itself, click "▸ Show the full handoff (editable)". It starts
    collapsed because most of the time you only want to write one sentence, not read
    several thousand characters.
 
 The new session opens automatically, titled `继承: <source title>`, with the same working
-directory, model route, and agent preset as the source session.
+directory and model route as the source session; its agent preset is inherited from the
+source by default (uncheck that box and the new session uses the DSH default preset).
 
 The "start working immediately" checkbox is on by default: the handoff is sent through
 `sessionController.prompt` as a normal user message and work begins right away. Unchecked,
