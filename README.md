@@ -11,6 +11,17 @@ document mechanically extracted from the source session → confirm → a new se
 created without the old history, and that handoff is sent as its first message. Work
 continues there. The source session is left untouched.
 
+<p>
+<img src="docs/session-menu.png" width="170" alt="The Inherit entry in the session menu">
+<img src="docs/inherit-dialog.png" width="330" alt="The inherit preview dialog">
+</p>
+
+The `/inherit` command is the same entry point (it shows up in the prompt's hints):
+
+<p>
+<img src="docs/inherit-command.png" width="700" alt="The /inherit command hint">
+</p>
+
 ```
 Pin           ← stock DSH
 Rename        ← stock DSH

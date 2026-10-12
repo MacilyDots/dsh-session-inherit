@@ -10,6 +10,17 @@
 交接单 → 确认 → 新建一个不带旧历史的会话，把这份交接单作为它的第一条消息发出，
 工作在新会话里继续。原会话原样保留。
 
+<p>
+<img src="docs/session-menu.png" width="170" alt="会话菜单里多出的「继承」">
+<img src="docs/inherit-dialog.png" width="330" alt="继承预览对话框">
+</p>
+
+`/inherit` 命令是同一个入口（指令提示里能搜到）：
+
+<p>
+<img src="docs/inherit-command.png" width="700" alt="/inherit 命令提示">
+</p>
+
 ```
 置顶          ← DSH 原版（Pin）
 重命名        ← DSH 原版（Rename）
