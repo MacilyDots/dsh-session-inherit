@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-inherit",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Inherit a long DeepSeek Harness session into a clean one: adds an \"Inherit\" row to the session \"...\" menu, mechanically extracts concrete anchors (task, recent instructions, files edited, recent tool failures, commands, todos) from the source session log without calling an LLM, creates a brand-new session in the same workspace and sends that handoff as its first message. The source session's agent preset is inherited by default.",
   "type": "module",
   "main": "./index.mjs",

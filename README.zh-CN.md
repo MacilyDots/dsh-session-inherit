@@ -195,7 +195,13 @@ session_read { sessionId, mode: 'search' | 'summary' | 'tail', query?, limit? }
 
 ## 安装
 
-本插件没有发布到 npm，从仓库直接装。改 profile 的 `package.json`，两处都要加：
+从 npm 装（推荐，一条命令）：
+
+```sh
+dsh plugin --profile <profile> add dsh-session-inherit
+```
+
+也可以不经过 npm，直接从仓库装。改 profile 的 `package.json`，两处都要加：
 
 ```json
 {
