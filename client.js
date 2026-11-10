@@ -194,14 +194,25 @@ window.__ModuleLoader__.load({
         if (previewInFlight) return
         previewInFlight = true
         dispatch({ phase: 'loading', sessionId: sessionId, title: displayTitle })
+        // preview 也必须有个上界。没有 AbortController 时，源会话读不出来（上游挂住、
+        // 大日志解压慢）会让 fetch 永久 pending，而 previewInFlight 一直是 true——
+        // 用户再点菜单项会被上面的 `if (previewInFlight) return` 直接挡掉，连重试都
+        // 做不了，只能刷新页面。所以超时必须中断请求并把标志复位。
+        var abort = new AbortController()
+        var timer = window.setTimeout(function () { abort.abort() }, 60000)
+        var settle = function () {
+          window.clearTimeout(timer)
+          previewInFlight = false
+        }
         fetch(PREVIEW_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ sessionId: sessionId, title: displayTitle, lang: fallbackLang() }),
+          signal: abort.signal,
         })
           .then(function (response) { return response.json() })
           .then(function (data) {
-            previewInFlight = false
+            settle()
             if (data === null || typeof data !== 'object' || data.ok !== true) {
               dispatch({
                 phase: 'error',
@@ -222,12 +233,14 @@ window.__ModuleLoader__.load({
             })
           })
           .catch(function (error) {
-            previewInFlight = false
+            settle()
             dispatch({
               phase: 'error',
               sessionId: sessionId,
               title: displayTitle,
-              error: String(error && error.message ? error.message : error),
+              error: error && error.name === 'AbortError'
+                ? '读取源会话超时（60 秒），可重试'
+                : String(error && error.message ? error.message : error),
             })
           })
       }
@@ -336,9 +349,11 @@ window.__ModuleLoader__.load({
         if (typeof detail.sessionId !== 'string') return
         setBusy(true)
         setError(null)
-        // 宿主侧若卡住，界面不能跟着无限等：90 秒后放弃等待并如实说明。
+        // 宿主侧若卡住，界面不能跟着无限等：120 秒后放弃等待并如实说明。
+        // 宿主自己已经有 60 秒总预算，留出一倍余量；超时后**不**判定失败，
+        // 因为宿主可能已经把会话建好了。
         var abort = new AbortController()
-        var timer = window.setTimeout(function () { abort.abort() }, 90000)
+        var timer = window.setTimeout(function () { abort.abort() }, 120000)
         fetch(COMMIT_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -362,23 +377,32 @@ window.__ModuleLoader__.load({
             window.clearTimeout(timer)
             setBusy(false)
             if (data === null || typeof data !== 'object' || data.ok !== true) {
-              setError(data !== null && typeof data === 'object' && data.error ? data.error : '未知错误')
+              var message = data !== null && typeof data === 'object' && data.error ? data.error : '未知错误'
+              // 409：同一源会话正在以另一组参数继承。这是并发保护，不是用户操作错误，
+              // 要把"为什么"说清楚，否则看起来像随机失败。
+              if (data !== null && typeof data === 'object' && data.code === 'conflicting-commit') {
+                message = message + '（等这一条完成后再点，或换一个会话继承）'
+              }
+              setError(message)
               return
             }
-            // 正常路径（交接单已作为首条消息发出）直接关框并打开新会话，不加摩擦。
-            if (data.mode === 'prompted') {
+            var warnings = Array.isArray(data.warnings) ? data.warnings : []
+            // 正常路径且没有任何降级：直接关框并打开新会话，不加摩擦。
+            if (data.mode === 'prompted' && warnings.length === 0) {
               setDetail(null)
               openWhenReady(data.sessionId)
               return
             }
-            // 降级路径（没自动开始 / 自动开始失败）必须让用户看见：以前这里只
-            // console.warn，对话框静默关掉，用户会以为新会话已经在跑了。
+            // 降级路径（没自动开始 / 自动开始失败 / 注入失败 / 部分步骤降级）必须让
+            // 用户看见：以前这里静默关掉对话框，用户会以为新会话已经在跑了。
             console.warn('[dsh-session-inherit] ' + String(data.note || data.mode))
             setDetail({
               phase: 'done',
               sessionId: data.sessionId,
               mode: data.mode,
+              state: typeof data.state === 'string' ? data.state : 'injected',
               note: typeof data.note === 'string' ? data.note : '',
+              warnings: warnings,
               // 宿主如实回报实际挂上的预设：界面照抄，不自己猜。
               preset: typeof data.preset === 'string' ? data.preset : null,
               presetInherited: data.presetInherited === true,
@@ -389,7 +413,7 @@ window.__ModuleLoader__.load({
             setBusy(false)
             var message = String(err && err.message ? err.message : err)
             if (err && err.name === 'AbortError') {
-              message = '宿主 90 秒未响应（会话可能已经建好但没返回）。先刷新会话列表看看侧边栏有没有「继承: …」；没有的话把这一条告诉我。'
+              message = '宿主 120 秒未响应（会话可能已经建好但没返回）。先刷新会话列表看看侧边栏有没有「继承: …」；没有的话把这一条告诉我。'
             }
             setError(message)
           })
@@ -472,6 +496,15 @@ window.__ModuleLoader__.load({
             key: 'donePreset',
             style: { marginTop: 4, fontSize: 12, color: 'var(--dsw-alias-label-secondary, #8a8a8e)' },
           }, (detail.presetInherited === true ? t('dialog.presetInherited') : t('dialog.presetFailed')) + detail.preset))
+        }
+        // 降级项要让用户看见：工作区没挂上、预设账本没同步、标题没改成都走这里。
+        // 以前这些只有日志里有，界面上一切正常，出问题时无从判断。
+        if (Array.isArray(detail.warnings) && detail.warnings.length > 0) {
+          body.push(h('div', {
+            key: 'doneWarnings',
+            style: { marginTop: 6, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warning-primary, #d97706)' },
+          }, '部分步骤已降级（' + detail.warnings.length + ' 项）：'
+            + detail.warnings.map(function (w) { return w && w.code ? String(w.code) : '(unknown)' }).join(', ')))
         }
       } else if (detail.phase === 'ready') {
         // 「下一步」是独立输入：交接单默认折叠之后，这里是主要的输入位置。

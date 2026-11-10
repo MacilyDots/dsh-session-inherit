@@ -415,8 +415,12 @@ test('preview 带出此前的继承记录，commit 后写入新记录', async ()
   const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
   assert.equal(commit.status, 200)
   const saved = JSON.parse(readFileSync(historyPath, 'utf8'))
-  assert.equal(saved[SESSION_ID].length, 2, 'commit 之后应新增一条记录')
-  assert.equal(saved[SESSION_ID][1].child, commit.json.sessionId)
+  // 磁盘格式升到 v2（读旧写新）：旧记录迁移为 state:'ok'，新记录先写 pending 再置 ok。
+  assert.equal(saved.version, 2, '写入必须是 v2 结构')
+  assert.equal(saved.sources[SESSION_ID].length, 2, 'commit 之后应新增一条记录')
+  assert.equal(saved.sources[SESSION_ID][1].child, commit.json.sessionId)
+  assert.equal(saved.sources[SESSION_ID][1].state, 'ok')
+  assert.equal(saved.sources[SESSION_ID][0].state, 'ok', '旧格式记录没有 state，按成功记录迁移')
 })
 
 // 「继承」把源会话编号写进交接单，但新会话读不了它（会话日志是多帧 zstd）。
@@ -595,3 +599,266 @@ test('取消勾选继承预设时用默认预设，且不登记绑定账本', as
     rmSync(dirname(bindingsPath), { recursive: true, force: true })
   }
 })
+
+/**
+ * 造一个能按字节位置切开的假请求：模拟 TCP 把 body 分成任意边界的两块。
+ * @param {string} method - HTTP 方法。
+ * @param {Buffer} owned - 完整 body。
+ * @param {number} cutAt - 第一块的长度。
+ * @returns {object} 假 IncomingMessage。
+ */
+function makeChunkedRequest(method, owned, cutAt) {
+  const handlers = {}
+  const req = {
+    method,
+    headers: { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' },
+    destroyed: false,
+    on(event, callback) {
+      handlers[event] = handlers[event] ?? []
+      handlers[event].push(callback)
+      return req
+    },
+    destroy() { req.destroyed = true },
+  }
+  setTimeout(() => {
+    for (const cb of handlers.data ?? []) cb(owned.subarray(0, cutAt))
+    for (const cb of handlers.data ?? []) cb(owned.subarray(cutAt))
+    for (const cb of handlers.end ?? []) cb()
+  }, 0)
+  return req
+}
+
+// readBody 曾经是 `data += chunk`：Buffer 隐式 toString() 会按 chunk 各自解码，
+// 边界落在 3 字节 CJK 字符中间就插入 U+FFFD。这种损坏不报错、不抛异常，
+// 只让标题/交接单正文里多出一处烂字——最难查的那一类。
+test('chunk 边界切在多字节字符中间也不产生 U+FFFD', async () => {
+  const handlers = new Map()
+  bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    webServer: { port: 19387, register(route) { handlers.set(route.path, route.handler); return () => {} } },
+  }, { cacheTtlMs: 0 })
+
+  const title = '武器贴图的中文标题'
+  const body = Buffer.from(JSON.stringify({ sessionId: SESSION_ID, title }), 'utf8')
+  const cutAt = body.indexOf(Buffer.from('中')) + 1
+  assert.ok(cutAt > 0 && cutAt < body.length, '前提：body 里必须有中文字符可切')
+
+  const res = makeResponse()
+  await handlers.get(PREVIEW)(makeChunkedRequest('POST', body, cutAt), res)
+  const json = JSON.parse(res.body)
+  assert.equal(json.ok, true)
+  assert.equal(json.source.title, title, '标题必须逐字原样到达 handler')
+  assert.ok(!res.body.includes('\uFFFD'), '响应里不该出现替换字符')
+})
+
+// preview 以前完全没有超时：源会话读不出来（上游挂住、大日志解压慢）时，
+// handler 永远不返回，对话框永久停在 loading，而客户端 previewInFlight 也一直是 true，
+// 连再点一次都做不到。现在必须有上界，且超时错误要带步骤名。
+test('preview 读源会话挂住时按预算超时，而不是永久 loading', async () => {
+  const handlers = new Map()
+  bootstrap({
+    sessionQuery: {
+      readSession() { return new Promise(() => {}) }, // 永不 settle
+    },
+    webServer: { port: 19387, register(route) { handlers.set(route.path, route.handler); return () => {} } },
+  }, { cacheTtlMs: 0, previewTimeoutMs: 40 })
+
+  const started = Date.now()
+  const res = makeResponse()
+  await handlers.get(PREVIEW)(makeRequest('POST', { sessionId: SESSION_ID }), res)
+  assert.ok(Date.now() - started < 3000, '必须按预算返回，不能挂住')
+  assert.equal(res.status, 500)
+  assert.match(JSON.parse(res.body).error, /读取源会话/, '错误必须带步骤名')
+})
+
+// 建会话失败后的降级重试只该重试"建会话"这一件事。旧版降级仍会再走一遍预设绑定：
+// 绑定的 fetch 没有超时，正是把 15 秒预算吃穿的原因；而那时会话可能已经建出来了。
+test('建会话失败降级重试时不登记预设账本', async () => {
+  const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
+  mkdirSync(dirname(bindingsPath), { recursive: true })
+  writeFileSync(bindingsPath, JSON.stringify({ [SESSION_ID]: 'preset-demo-0001' }))
+
+  const handlers = new Map()
+  const calls = []
+  let attempts = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return { ok: true, status: 200, async json() { return { ok: true } } }
+  }
+  try {
+    bootstrap({
+      sessionQuery: makeSessionQuery(sampleEvents()),
+      webServer: { port: 19387, register(route) { handlers.set(route.path, route.handler); return () => {} } },
+      agents: {
+        async create(options) {
+          attempts += 1
+          if (attempts === 1) throw new Error('create exploded') // 首次（带 preset）失败
+          return { agent: { session: { id: options.sessionId, append() {} } } }
+        },
+      },
+      agentPresets: { async resolve(id) { return { id } }, async mount() {} },
+    })
+
+    const commit = await call(handlers.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+    assert.equal(commit.status, 200, '降级成功就该返回 200')
+    assert.equal(attempts, 2, '必须先失败一次、再降级重试一次')
+    assert.equal(calls.length, 0, '降级那次没有真正挂 preset，不该登记账本，也不该产生网络调用')
+    assert.equal(commit.json.presetInherited, false, '如实回报：这次没有真正挂上预设')
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dirname(bindingsPath), { recursive: true, force: true })
+  }
+})
+
+// ── 并发幂等（P0-3）────────────────────────────────────────────────────────
+//
+// 旧实现只挡客户端连点，两个标签页同时点会建出两个子会话。这里按
+// 「源会话 + 参数指纹」在途去重：同参数复用同一结果，不同参数直接拒绝。
+
+test('同参数并发 commit 只建一个会话，第二个复用同一结果', async () => {
+  let created = 0
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: {
+      async create(options) {
+        created += 1
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        return { agent: { session: { id: options.sessionId, async append() {} } } }
+      },
+    },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  })
+
+  const payload = { sessionId: SESSION_ID, start: true }
+  const first = call(routes.get(COMMIT), 'POST', payload)
+  const second = call(routes.get(COMMIT), 'POST', payload)
+  const [a, b] = await Promise.all([first, second])
+
+  assert.equal(a.status, 200)
+  assert.equal(b.status, 200)
+  assert.equal(created, 1, '并发两次只能建一个会话')
+  assert.equal(a.json.sessionId, b.json.sessionId, '两个响应必须指向同一个会话')
+  assert.ok(a.json.deduplicated === true || b.json.deduplicated === true, '被复用的那次要标 deduplicated')
+})
+
+test('同源不同参数的并发 commit 返回 409，不静默复用别人的参数', async () => {
+  let created = 0
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: {
+      async create(options) {
+        created += 1
+        await new Promise((resolve) => setTimeout(resolve, 60))
+        return { agent: { session: { id: options.sessionId, async append() {} } } }
+      },
+    },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  })
+
+  const [a, b] = await Promise.all([
+    call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: true }),
+    call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false }),
+  ])
+  const statuses = [a.status, b.status].sort((x, y) => x - y)
+  assert.deepEqual(statuses, [200, 409], '必须一个成功、一个冲突')
+  const conflict = a.status === 409 ? a.json : b.json
+  assert.equal(conflict.code, 'conflicting-commit')
+  assert.equal(created, 1, '被拒绝的那次不该建会话')
+  // 等成功的那条跑完，避免测试结束时还有未结算的 promise。
+  await new Promise((resolve) => setTimeout(resolve, 120))
+})
+
+// ── 假失败、真建好（P0-1 语义）──────────────────────────────────────────────
+
+test('注入失败时返回 200 + pending-injection，会话不丢', async () => {
+  const historyPath = join(process.env.DSH_HOME, 'session-inherit', 'history.json')
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    // 会话建得出来，但不支持 append；prompt 也失败 → 注入无路可走
+    agents: { async create(options) { return { agent: { session: { id: options.sessionId } } } } },
+    sessionController: { async prompt() { throw new Error('prompt exploded') } },
+    sessionTitle: { rename() {} },
+  })
+
+  const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: true })
+  assert.equal(commit.status, 200, '会话已经建好就不能报 500——那等于让用户丢掉它')
+  assert.equal(commit.json.ok, true)
+  assert.equal(commit.json.state, 'pending-injection')
+  assert.ok(commit.json.sessionId.startsWith('session-'))
+  assert.equal(commit.json.warnings[0].code, 'inject-failed')
+  assert.match(commit.json.note, /会话已创建/)
+  // 账本必须记下这次失败，否则没法重试、也没法事后找回。
+  const saved = JSON.parse(readFileSync(historyPath, 'utf8'))
+  const entry = (saved.sources[SESSION_ID] ?? []).find((item) => item.child === commit.json.sessionId)
+  assert.ok(entry !== undefined, '失败也要记账')
+  assert.equal(entry.state, 'failed')
+})
+
+test('建会话超时不再降级重试（否则会建出第二个会话）', async () => {
+  let createCalls = 0
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: {
+      create() {
+        createCalls += 1
+        return new Promise(() => {}) // 永不 settle：模拟 agents.create 挂住
+      },
+    },
+    sessionTitle: { rename() {} },
+  }, { cacheTtlMs: 0, timeoutMs: { create: 60, total: 60_000, build: 10_000, binding: 60, workspace: 60, inject: 60 } })
+
+  const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+  assert.equal(commit.status, 500)
+  assert.equal(commit.json.code, 'create-timeout', '必须明确告诉用户会话可能已建好')
+  assert.equal(createCalls, 1, '超时后重试会造成第二个会话，绝不能重试')
+  assert.match(commit.json.error, /可能已经建好/)
+})
+
+// 三处入口（HTTP / session_inherit 工具 / /inherit 命令）以前各写一遍流水线，
+// 已经出现过标题、超时、语言三处不一致。现在必须走同一条并产出同形状的结果。
+test('三处入口走同一条流水线，产出同形状结果', async () => {
+  const registeredTools = []
+  const registeredCommands = []
+  let created = 0
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: {
+      async create(options) {
+        created += 1
+        return { agent: { session: { id: options.sessionId, async append() {} } } }
+      },
+    },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+    tools: { register(spec) { registeredTools.push(spec); return () => {} } },
+    commands: { register(spec) { registeredCommands.push(spec); return () => {} } },
+  })
+
+  // 1) HTTP
+  const httpResult = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+  assert.equal(httpResult.status, 200)
+  assert.match(httpResult.json.sessionId, /^session-/, 'HTTP 入口要给出会话 id')
+  assert.equal(httpResult.json.state, 'injected')
+
+  // 2) agent 工具
+  const tool = registeredTools.find((spec) => spec.name === 'session_inherit')
+  assert.ok(tool !== undefined, 'session_inherit 未注册')
+  const toolText = await tool.execute({ sessionId: SESSION_ID, start: false })
+  assert.match(toolText, /继承完成：新会话 session-/, '工具入口要给出会话 id')
+
+  // 3) /inherit 命令（带 --next，验证下一步确实写进了交接单）
+  const command = registeredCommands.find((spec) => spec.name === 'inherit')
+  assert.ok(command !== undefined, '/inherit 未注册')
+  const commandResult = await command.handler({
+    rawInput: `${SESSION_ID} --next 先跑一次 npm test`,
+    agent: { session: { id: SESSION_ID } },
+  })
+  assert.equal(commandResult.kind, 'success')
+  assert.match(commandResult.text, /继承完成：新会话/)
+
+  assert.equal(created, 3, '三处入口各建一次会话，但共用同一套逻辑')
+})
+

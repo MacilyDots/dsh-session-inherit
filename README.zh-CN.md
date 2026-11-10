@@ -255,7 +255,30 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
     recentUsers: 6       # 交接单里带多少条最近的用户指令（1–50）
     startByDefault: true # 预览框里那个勾选框的默认值
     cacheTtlMs: 120000   # preview → commit 之间复用一次日志读；0 = 不缓存
+    previewTimeoutMs: 30000  # 预览读源会话的上界
+    timeoutMs:               # commit 分步预算；每步取 min(自己的 cap, 剩余总预算)
+      total: 60000
+      build: 20000
+      create: 10000
+      binding: 2000        # 第三方预设账本登记，不阻断交接单
+      workspace: 5000
+      inject: 15000
 ```
+
+## 出问题时会发生什么
+
+会话在注入交接单之前就建好了，插件因此把"会话已存在"当作不可逆的分界线，绝不把它
+藏在一个错误码后面：
+
+- **建会话之后的任何一步失败**返回 `200` + `state: "pending-injection"`，并带
+  `warnings[]`。对话框不关，摆出新会话 id，会话留在侧边栏——不会变成孤儿。
+- **建会话本身超时**返回 `code: "create-timeout"`，并且**故意不重试**：
+  `agents.create` 无法取消，重试会造出第二个会话、第一个彻底泄漏。错误文案会让你先
+  刷新侧边栏确认，再决定要不要再点。
+- **同一个会话并发继承两次**：参数相同则复用同一个结果（标 `deduplicated`）；参数
+  不同则第二个直接 `409 conflicting-commit`，不静默套用第一份参数。
+- 降级步骤（挂工作区、预设账本、改标题）不会让交接单失败，只进 `warnings[]` 并在
+  对话框里显示。
 
 ## 已知限制（如实说）
 

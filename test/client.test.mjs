@@ -439,3 +439,162 @@ test('正常路径（mode=prompted）关框并打开新会话，不打断流程'
     globalThis.fetch = originalFetch
   }
 })
+
+// preview 无超时的时候，源会话读不出来会让 fetch 永久 pending，而 previewInFlight
+// 一直是 true——菜单项再点会被 `if (previewInFlight) return` 直接挡掉，用户只能刷新页面。
+// 这条用例把 60 秒超时压成一次微任务，验证两件事：超时能中断、中断后还能再点。
+test('preview 超时后标志复位，可以再点一次（不是永久卡死）', async () => {
+  const harness = createHarness()
+  const fetches = []
+  const originalFetch = globalThis.fetch
+  const abortError = () => {
+    const error = new Error('aborted')
+    error.name = 'AbortError'
+    return error
+  }
+  globalThis.fetch = (url, options) => {
+    fetches.push({ url: String(url), options: options === undefined ? {} : options })
+    const signal = options === undefined ? undefined : options.signal
+    // 没有 signal 就真的永不返回：旧实现正是这样卡死的
+    if (signal === undefined) return new Promise(() => {})
+    return new Promise((_resolve, reject) => {
+      if (signal.aborted === true) { reject(abortError()); return }
+      signal.addEventListener('abort', () => reject(abortError()))
+    })
+  }
+
+  let menuComponent = null
+  let dialogComponent = null
+  let realSetTimeout = null
+  try {
+    const { mod } = await loadClient({ react: harness.react })
+    // 只在本用例内把 60 秒超时压成一次微任务（fetch 已注册 abort 监听后才触发）
+    realSetTimeout = globalThis.window.setTimeout
+    globalThis.window.setTimeout = (callback) => {
+      queueMicrotask(() => callback())
+      return 0
+    }
+    const ctx = {
+      get() { return undefined },
+      effect(callback) { const disposer = callback(); return typeof disposer === 'function' ? disposer : () => {} },
+      slots: {
+        inject(_slotName, callback) { callback(); return () => {} },
+        register(options, component) {
+          if (options.name === MENU_SLOT) menuComponent = component
+          if (options.name === OVERLAY_SLOT) dialogComponent = component
+          return () => {}
+        },
+      },
+    }
+    mod.apply(ctx)
+    harness.render(dialogComponent)
+    harness.flushEffects(dialogComponent)
+
+    const render = () => harness.render(menuComponent, {
+      sessionId: SOURCE,
+      displayTitle: '演示会话',
+      useMenuOpenState: () => [true, () => {}],
+    })
+    const click = (tree) => {
+      const button = collect(tree).find((node) => node.type === 'button' && node.props.role === 'menuitem')
+      assert.ok(button !== undefined)
+      button.props.onClick()
+    }
+
+    click(render())
+    await settle()
+    await settle()
+    assert.equal(fetches.length, 1, '第一次点击应发出 preview')
+    assert.ok(fetches[0].options.signal !== undefined, 'preview 必须带可中断的 signal')
+
+    const tree = harness.render(dialogComponent)
+    assert.ok(JSON.stringify(tree).includes('超时'), '超时后对话框应给出可重试的提示')
+
+    click(render())
+    await settle()
+    assert.equal(fetches.length, 2, '超时后标志必须复位，第二次点击要能再发请求')
+  } finally {
+    globalThis.fetch = originalFetch
+    if (realSetTimeout !== null) globalThis.window.setTimeout = realSetTimeout
+  }
+})
+
+// 宿主在"会话已建好、但注入失败"时返回 200 + state:'pending-injection'。这时界面
+// 绝不能关掉对话框装作没事——用户需要知道编号、需要知道该去侧边栏找什么。
+test('注入失败（pending-injection）时对话框保留并说清楚，而不是静默关闭', async () => {
+  const harness = createHarness()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (url) => {
+    if (String(url).includes('/preview')) {
+      return Promise.resolve({
+        json: () => Promise.resolve({
+          ok: true,
+          doc: '📋 会话继承单\n\n## 1. 任务目标\n演示用交接单',
+          source: { sessionId: SOURCE, turns: 3 },
+          route: null,
+          inherited: [],
+        }),
+      })
+    }
+    return Promise.resolve({
+      json: () => Promise.resolve({
+        ok: true,
+        sessionId: CHILD,
+        state: 'pending-injection',
+        mode: 'none',
+        note: '会话已创建（' + CHILD + '），但交接单注入失败：会话不支持 append。',
+        warnings: [{ code: 'inject-failed', message: 'no append' }],
+        preset: null,
+        presetInherited: false,
+      }),
+    })
+  }
+
+  try {
+    const { mod } = await loadClient({ react: harness.react })
+    let menuComponent = null
+    let dialogComponent = null
+    const ctx = {
+      get() { return undefined },
+      effect(callback) { const disposer = callback(); return typeof disposer === 'function' ? disposer : () => {} },
+      slots: {
+        inject(_slotName, callback) { callback(); return () => {} },
+        register(options, component) {
+          if (options.name === MENU_SLOT) menuComponent = component
+          if (options.name === OVERLAY_SLOT) dialogComponent = component
+          return () => {}
+        },
+      },
+    }
+    mod.apply(ctx)
+    harness.render(dialogComponent)
+    harness.flushEffects(dialogComponent)
+
+    const menuTree = harness.render(menuComponent, {
+      sessionId: SOURCE,
+      displayTitle: '演示会话',
+      useMenuOpenState: () => [true, () => {}],
+    })
+    const menuButton = collect(menuTree).find((node) => node.type === 'button' && node.props.role === 'menuitem')
+    assert.ok(menuButton !== undefined)
+    menuButton.props.onClick()
+    await settle()
+
+    const readyTree = harness.render(dialogComponent)
+    const confirmButton = collect(readyTree)
+      .find((node) => node.type === 'button' && node.children[0] === '创建并继承')
+    assert.ok(confirmButton !== undefined)
+    confirmButton.props.onClick()
+    await settle()
+    await settle()
+
+    const tree = harness.render(dialogComponent)
+    assert.ok(tree !== null, '注入失败时不能自动关闭对话框')
+    const text = JSON.stringify(tree)
+    assert.ok(text.includes('会话已创建'), '要如实说明会话已建好')
+    assert.ok(text.includes(CHILD), '要把会话 id 摆出来')
+    assert.ok(text.includes('inject-failed'), '降级项要让用户看见')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

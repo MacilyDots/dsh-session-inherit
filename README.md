@@ -277,7 +277,34 @@ Override in the profile's `cordis.patch.yml` (all optional):
     recentUsers: 6       # how many recent user instructions to include (1–50)
     startByDefault: true # default value of the preview checkbox
     cacheTtlMs: 120000   # reuse one log read between preview and commit; 0 = no cache
+    previewTimeoutMs: 30000  # upper bound for reading the source session in the preview
+    timeoutMs:               # commit step budget; a step is capped by min(its own, remaining total)
+      total: 60000
+      build: 20000
+      create: 10000
+      binding: 2000        # third-party preset ledger call; never blocks the handoff
+      workspace: 5000
+      inject: 15000
 ```
+
+## What happens when something fails
+
+A session is created before the handoff is injected, so the plugin treats "session
+exists" as the point of no return and never hides it behind an error:
+
+- **Failure after the session was created** returns `200` with `state:
+  "pending-injection"` and a `warnings[]` list. The dialog stays open, shows the new
+  session id, and the session stays in your sidebar — it is never orphaned.
+- **Creating the session itself timing out** returns an error (`code:
+  "create-timeout"`) and deliberately does **not** retry: `agents.create` cannot be
+  cancelled, so a retry would produce a second session while the first one leaks. The
+  error text tells you to refresh the sidebar before clicking again.
+- **Two concurrent inherits of the same session** with the same parameters return the
+  same session (marked `deduplicated`); with different parameters the second one is
+  rejected with `409 conflicting-commit` instead of silently reusing the first one's
+  settings.
+- Degraded steps (workspace attach, preset ledger, rename) never fail the handoff; they
+  are reported in `warnings[]` and shown in the dialog.
 
 ## Known limitations
 
