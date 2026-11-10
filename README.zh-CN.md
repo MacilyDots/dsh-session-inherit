@@ -249,8 +249,9 @@ profile 的 `compatibility.json`——profile 启动时会校验插件对 `@deep
 
 ## 组件构成
 
-- 宿主半 `index.mjs`：注册 `POST /__session-inherit/preview` 与
-  `POST /__session-inherit/commit`（同源校验，仅本机 loopback 使用）
+- 宿主半 `index.mjs`：注册 `POST /__session-inherit/preview`、
+  `POST /__session-inherit/commit`、`POST /__session-inherit/retry` 与
+  `GET /__session-inherit/health`（同源校验，仅本机 loopback 使用）
 - 客户端半 `client.js`：注册
   `sidebar.workspaces.session.menu.item`(id `session-inherit`, order 350) 与
   `shell.overlay` 上的预览对话框
@@ -279,6 +280,20 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
       workspace: 5000
       inject: 15000
 ```
+
+## 健康检查
+
+`GET /__session-inherit/health` 只读，回答"这个插件现在看到了什么"：
+
+- `services.available` / `services.missing`：哪些 DSH 服务取到了，哪些没取到；
+- `bindings`：`session-bindings.json` 的形态（`object` / `legacy` / `mixed` /
+  `invalid` / `absent`），以及实际能解析出多少条；
+- `events.seen` 与 `events.expected`：已经消费过哪些事件类型、提取依赖哪些；
+- `cache`：缓存了几份派生结果。
+
+它是因为一次静默故障才加的：dsh-tavern 2.7 把绑定账本从字符串改成对象，
+本插件继续读字符串，继承出来的人格悄悄变回默认模式，全链路一个报错都没有。
+DSH 升级后觉得哪里不对，先看这里。
 
 ## 出问题时会发生什么
 
@@ -342,9 +357,9 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
 ## 测试
 
 ```sh
-node test/extract.test.mjs   # 提取器纯函数（32）
-node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录（18）
-node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（5）
+node test/extract.test.mjs   # 提取器纯函数（39）
+node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health 与 retry 端点（33）
+node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（7）
 ```
 
 ## 发布

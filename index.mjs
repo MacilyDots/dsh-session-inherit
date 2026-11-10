@@ -23,12 +23,13 @@
 // 全部按需查找，缺一个就降级一项，不让整个插件失活。
 
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { EVENTS, inspectBindings, ownVersion, probe, SERVICES } from './lib/contracts.mjs'
 import { DOC_MARK, formatTime } from './lib/extract.mjs'
 import { resolveConfig } from './lib/config.mjs'
-import { InheritError, inheritSession } from './lib/inherit.mjs'
+import { InheritError, inheritSession, retryInjection } from './lib/inherit.mjs'
 import { readInheritedBy } from './lib/history.mjs'
 import { note, selfTestFlag } from './lib/log.mjs'
-import { buildDoc, readSnapshot } from './lib/read.mjs'
+import { buildDoc, derivedCacheStats, getSeenEvents, readSnapshot } from './lib/read.mjs'
 import { readBody, sameOrigin, sendJson } from './lib/security.mjs'
 import { createChild, renameChild } from './lib/session.mjs'
 import { renderSessionSearch, renderSessionSummary, renderSessionTail } from './lib/session-read.mjs'
@@ -191,6 +192,103 @@ async function handleCommit(ctx, resolved, req, res) {
   }
 }
 
+// ── 重试注入 ──────────────────────────────────────────────────────────────
+
+/**
+ * 重试注入：会话建好了但交接单没进去时，用户在对话框里点「重试注入」。
+ *
+ * 服务端只认账本里 `state === 'failed'` 的子会话，避免这个端点变成"往任意会话
+ * 写任意文本"的入口。
+ * @param {object} ctx - Cordis 上下文。
+ * @param {object} resolved - 归一化配置。
+ * @param {import('node:http').IncomingMessage} req - 请求。
+ * @param {import('node:http').ServerResponse} res - 响应。
+ */
+async function handleRetry(ctx, resolved, req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { ok: false, error: 'forbidden' })
+    return
+  }
+  let args
+  try {
+    const body = await readBody(req)
+    args = body.length > 0 ? JSON.parse(body) : {}
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: `bad json body: ${String(error?.message ?? error)}` })
+    return
+  }
+  const childSessionId = typeof args?.childSessionId === 'string' ? args.childSessionId.trim() : ''
+  if (!SESSION_ID_RE.test(childSessionId)) {
+    sendJson(res, 400, { ok: false, error: `invalid child session id: ${childSessionId}` })
+    return
+  }
+  try {
+    const result = await retryInjection(ctx, {
+      childSessionId,
+      doc: typeof args?.doc === 'string' ? args.doc : undefined,
+      start: typeof args?.start === 'boolean' ? args.start : true,
+    }, resolved)
+    sendJson(res, 200, { ok: true, ...result })
+  } catch (error) {
+    const status = error instanceof InheritError
+      ? (error.code === 'bad-request' || error.code === 'empty-doc' ? 400
+        : error.code === 'unknown-child' || error.code === 'not-retryable' ? 409
+          : 500)
+      : 500
+    const payload = { ok: false, error: String(error?.message ?? error) }
+    if (error instanceof InheritError) payload.code = error.code
+    sendJson(res, status, payload)
+  }
+}
+
+// ── 健康检查 ──────────────────────────────────────────────────────────────
+
+/**
+ * 只读健康端点：DSH 升级或跨插件契约变化后，先看这里。
+ *
+ * 它存在的直接原因：2026-11-10 dsh-tavern 把 `session-bindings.json` 从字符串改成
+ * 对象，本插件读不到绑定 → 继承出来的人格变标准模式，而页脚仍写"已继承"。整条
+ * 链路没有任何报错，只能靠用户发现"人格丢了"。health 把服务缺失、账本格式、
+ * 已见事件类型一次摆出来，下次这种断裂一眼可见。
+ * @param {object} ctx - Cordis 上下文。
+ * @param {object} resolved - 归一化配置。
+ * @param {import('node:http').IncomingMessage} req - 请求。
+ * @param {import('node:http').ServerResponse} res - 响应。
+ */
+function handleHealth(ctx, resolved, req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { ok: false, error: 'forbidden' })
+    return
+  }
+  const services = probe(ctx)
+  sendJson(res, 200, {
+    ok: true,
+    plugin: { name, version: ownVersion() },
+    runtime: { node: process.version, platform: process.platform, arch: process.arch },
+    services,
+    // 跨插件账本的格式：object 是我们能解析的新格式，legacy 是旧字符串，
+    // mixed 说明迁移半途或有人手改过，invalid 说明文件坏了。
+    bindings: inspectBindings(),
+    events: { seen: getSeenEvents(), expected: Object.values(EVENTS) },
+    cache: derivedCacheStats(),
+    config: {
+      recentUsers: resolved.recentUsers,
+      startByDefault: resolved.startByDefault,
+      cacheTtlMs: resolved.cacheTtlMs,
+      previewTimeoutMs: resolved.previewTimeoutMs,
+      timeoutMs: resolved.timeoutMs,
+    },
+  })
+}
+
 // ── 自检 ──────────────────────────────────────────────────────────────────
 
 /**
@@ -296,6 +394,13 @@ export function apply(ctx, config = {}) {
   const resolved = resolveConfig(config)
   if (!resolved.enabled) return
 
+  // 启动时做一次契约探测并写日志：缺哪个服务、跨插件账本是什么格式。
+  // 这次预设失效就是"格式换了、我们静默读不到"，日志里有一行就能少查半天。
+  const probed = probe(ctx)
+  note(`probe: 服务 ${probed.available.length}/${SERVICES.length} 可用${probed.missing.length > 0 ? `，缺 ${probed.missing.join(', ')}` : ''}`)
+  const bindings = inspectBindings()
+  note(`probe: bindings state=${bindings.state} entries=${bindings.entries} (object=${bindings.object} legacy=${bindings.legacy} none=${bindings.none} invalid=${bindings.invalid})`)
+
   /**
    * 注册两个 HTTP 端点。
    * webServer 一律通过 `ctx.get` 取（cordis 下直接读未声明的属性会抛
@@ -314,6 +419,16 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: `${ROUTE_PREFIX}/commit`,
       handler: (req, res) => handleCommit(ctx, resolved, req, res),
+    }))
+    host.effect(() => webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/retry`,
+      handler: (req, res) => handleRetry(ctx, resolved, req, res),
+    }))
+    host.effect(() => webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/health`,
+      handler: (req, res) => handleHealth(ctx, resolved, req, res),
     }))
   }
 

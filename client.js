@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
     var EVENT = 'dsh-session-inherit:open'
     var PREVIEW_URL = '/__session-inherit/preview'
     var COMMIT_URL = '/__session-inherit/commit'
+    var RETRY_URL = '/__session-inherit/retry'
 
     // ── 文案 ──────────────────────────────────────────────────────────────
     var zhDict = {
@@ -419,6 +420,34 @@ window.__ModuleLoader__.load({
           })
       }
 
+      // 注入失败后的补救入口：会话已经在侧边栏里，不必手抄交接单。
+      var retryInject = function () {
+        if (busy === true || detail === null || typeof detail.sessionId !== 'string') return
+        var childId = detail.sessionId
+        setBusy(true)
+        setError(null)
+        fetch(RETRY_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ childSessionId: childId, doc: doc, start: true }),
+        })
+          .then(function (response) { return response.json() })
+          .then(function (data) {
+            setBusy(false)
+            if (data === null || typeof data !== 'object' || data.ok !== true) {
+              setError(data !== null && typeof data === 'object' && data.error ? data.error : '重试注入失败')
+              return
+            }
+            console.warn('[dsh-session-inherit] retry ' + String(data.mode || ''))
+            setDetail(null)
+            openWhenReady(childId)
+          })
+          .catch(function (err) {
+            setBusy(false)
+            setError(String(err && err.message ? err.message : err))
+          })
+      }
+
       if (detail === null) return null
 
       var Modal = primitives !== null ? primitives.Modal : null
@@ -505,6 +534,25 @@ window.__ModuleLoader__.load({
             style: { marginTop: 6, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warning-primary, #d97706)' },
           }, '部分步骤已降级（' + detail.warnings.length + ' 项）：'
             + detail.warnings.map(function (w) { return w && w.code ? String(w.code) : '(unknown)' }).join(', ')))
+        }
+        // 注入失败时给一个直接的补救入口：会话已经在侧边栏里了，用户不必手抄交接单。
+        if (detail.state === 'pending-injection') {
+          body.push(h('button', {
+            key: 'retry',
+            type: 'button',
+            disabled: busy === true,
+            onClick: retryInject,
+            style: {
+              marginTop: 10,
+              padding: '6px 14px',
+              borderRadius: 6,
+              border: '1px solid var(--dsw-alias-border-primary, #3a3a3c)',
+              background: 'transparent',
+              color: 'var(--dsw-alias-label-primary, inherit)',
+              cursor: busy === true ? 'default' : 'pointer',
+              fontSize: 13,
+            },
+          }, busy === true ? '正在重试…' : '重试注入'))
         }
       } else if (detail.phase === 'ready') {
         // 「下一步」是独立输入：交接单默认折叠之后，这里是主要的输入位置。

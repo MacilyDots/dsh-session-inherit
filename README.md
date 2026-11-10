@@ -274,8 +274,9 @@ first: on startup a profile validates each plugin's peerDependencies against
 
 ## Components
 
-- Host half `index.mjs`: registers `POST /__session-inherit/preview` and
-  `POST /__session-inherit/commit` (same-origin check, loopback only)
+- Host half `index.mjs`: registers `POST /__session-inherit/preview`,
+  `POST /__session-inherit/commit`, `POST /__session-inherit/retry` and
+  `GET /__session-inherit/health` (same-origin check, loopback only)
 - Client half `client.js`: registers `sidebar.workspaces.session.menu.item`
   (id `session-inherit`, order 350) and the preview dialog on `shell.overlay`
 
@@ -304,6 +305,23 @@ Override in the profile's `cordis.patch.yml` (all optional):
       workspace: 5000
       inject: 15000
 ```
+
+## Health check
+
+`GET /__session-inherit/health` is read-only and answers "what does this plugin
+see right now":
+
+- `services.available` / `services.missing` — which DSH services resolved;
+- `bindings` — the shape of `session-bindings.json` (`object` / `legacy` /
+  `mixed` / `invalid` / `absent`) and how many entries actually parse;
+- `events.seen` vs `events.expected` — which event types were consumed, against
+  the ones the extraction depends on;
+- `cache` — how many derived results are held.
+
+It exists because of a silent failure: dsh-tavern 2.7 changed the bindings file
+from strings to objects, this plugin kept reading strings, and inheriting a
+session quietly lost its persona — no error anywhere. If something looks wrong
+after a DSH update, look here first.
 
 ## What happens when something fails
 
@@ -386,9 +404,9 @@ exists" as the point of no return and never hides it behind an error:
 ## Tests
 
 ```sh
-node test/extract.test.mjs   # extractor pure functions (32)
-node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, and the inherit ledger against a fake ctx (18)
-node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (5)
+node test/extract.test.mjs   # extractor pure functions (39)
+node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health and retry endpoints against a fake ctx (33)
+node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)
 ```
 
 ## Releasing

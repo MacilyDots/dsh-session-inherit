@@ -14,10 +14,15 @@ import { dirname, join } from 'node:path'
 // 所以环境变量在 import 之前设置，且 index.mjs 用动态 import 拉进来。
 process.env.DSH_SESSION_INHERIT_LOG = join(tmpdir(), 'dsh-session-inherit-test.log')
 process.env.DSH_HOME = join(tmpdir(), 'dsh-session-inherit-test-home')
+// 每次跑都从干净状态开始：history.json / session-bindings.json 是跨用例共享的全局文件，
+// 上一次失败运行留下的残留会让这次出现"ppreset 凭空变成 preset-x"这类假失败。
+rmSync(process.env.DSH_HOME, { recursive: true, force: true })
 const { apply, name: pluginName, inject } = await import('../index.mjs')
 
 const PREVIEW = '/__session-inherit/preview'
 const COMMIT = '/__session-inherit/commit'
+const RETRY = '/__session-inherit/retry'
+const HEALTH = '/__session-inherit/health'
 
 const SESSION_ID = 'session-11111111-2222-3333-4444-555555555555'
 
@@ -977,4 +982,105 @@ test("绑定是 mode:'none' 时不当成有绑定，回退 header 的预设", as
     rmSync(dirname(bindingsPath), { recursive: true, force: true })
   }
 })
+
+// ── health 端点（P2-2）────────────────────────────────────────────────────
+//
+// 这次预设失效的根因是"跨插件账本格式换了、我们静默读不到"，整条链路没有任何
+// 报错。health 把这些契约状态一次暴露出来，下次升级或换格式时先看它。
+
+test('health 报告服务清单、账本格式与缓存状态', async () => {
+  const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
+  mkdirSync(dirname(bindingsPath), { recursive: true })
+  writeFileSync(bindingsPath, JSON.stringify({
+    [SESSION_ID]: { mode: 'preset', presetId: 'preset-x', source: 'legacy', at: 1, rev: 1 },
+    'session-other': { mode: 'none' },
+  }))
+  try {
+    const { routes } = bootstrap({ sessionQuery: makeSessionQuery(sampleEvents()) })
+    const health = await call(routes.get(HEALTH), 'GET', undefined)
+    assert.equal(health.status, 200)
+    assert.equal(health.json.ok, true)
+    assert.match(String(health.json.plugin.version), /^\d+\.\d+\.\d+/, '要报自身版本')
+    assert.equal(health.json.bindings.state, 'object', 'dsh-tavern 2.7+ 的对象格式')
+    assert.equal(health.json.bindings.entries, 2)
+    assert.equal(health.json.bindings.object, 1)
+    assert.equal(health.json.bindings.none, 1)
+    assert.ok(Array.isArray(health.json.services.available))
+    assert.ok(Array.isArray(health.json.events.expected))
+    assert.equal(typeof health.json.cache.size, 'number')
+  } finally {
+    // 账本是全局文件（DSH_HOME 下），不清理会污染后面的用例。
+    rmSync(dirname(bindingsPath), { recursive: true, force: true })
+  }
+})
+
+// ── 重试注入（P0-2）───────────────────────────────────────────────────────
+
+const CHILD = 'session-99999999-8888-7777-6666-555555555555'
+
+/**
+ * 预置一条继承记录。
+ * @param {string} state - ok / failed / pending。
+ * @param {string} childId - 子会话 id。
+ */
+function seedHistory(state, childId = CHILD) {
+  const historyPath = join(process.env.DSH_HOME, 'session-inherit', 'history.json')
+  mkdirSync(dirname(historyPath), { recursive: true })
+  writeFileSync(historyPath, JSON.stringify({
+    version: 2,
+    sources: { [SESSION_ID]: [{ child: childId, at: 1, state }] },
+  }))
+}
+
+test('注入失败后重试成功，账本置回 ok', async () => {
+  seedHistory('failed')
+  const prompted = []
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    sessionController: { async prompt(request) { prompted.push(request); return { accepted: true } } },
+  })
+
+  const res = await call(routes.get(RETRY), 'POST', { childSessionId: CHILD, doc: '📋 会话继承单\n\n## 任务目标\n重试的正文', start: true })
+  assert.equal(res.status, 200)
+  assert.equal(res.json.ok, true)
+  assert.equal(res.json.mode, 'prompted')
+  assert.equal(prompted.length, 1, '必须真的把交接单发出去')
+
+  const saved = JSON.parse(readFileSync(join(process.env.DSH_HOME, 'session-inherit', 'history.json'), 'utf8'))
+  assert.equal(saved.sources[SESSION_ID][0].state, 'ok', '成功后账本要置 ok')
+})
+
+test('子会话里已有交接单时重试不重复注入', async () => {
+  seedHistory('failed')
+  const events = [
+    ...sampleEvents(),
+    { type: 'user/message', seq: 99, time: 1_700_000_020_000, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '📋 会话继承单\n\n## 任务目标\n之前已经写进去了' }] } },
+  ]
+  const prompted = []
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(events),
+    sessionController: { async prompt(request) { prompted.push(request); return { accepted: true } } },
+  })
+
+  const res = await call(routes.get(RETRY), 'POST', { childSessionId: CHILD, doc: '📋 会话继承单\n\n## 任务目标\n要重试的正文' })
+  assert.equal(res.status, 200)
+  assert.equal(res.json.mode, 'already-injected')
+  assert.equal(prompted.length, 0, '已经写进去了就不能再发一遍')
+})
+
+test('非 failed 状态的记录拒绝重试，未知会话也拒绝', async () => {
+  seedHistory('pending')
+  const { routes } = bootstrap({ sessionQuery: makeSessionQuery(sampleEvents()) })
+  const notRetryable = await call(routes.get(RETRY), 'POST', { childSessionId: CHILD, doc: '📋 会话继承单' })
+  assert.equal(notRetryable.status, 409)
+  assert.equal(notRetryable.json.code, 'not-retryable')
+
+  const unknown = await call(routes.get(RETRY), 'POST', {
+    childSessionId: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    doc: '📋 会话继承单',
+  })
+  assert.equal(unknown.status, 409)
+  assert.equal(unknown.json.code, 'unknown-child')
+})
+
 
