@@ -301,6 +301,8 @@ Override in the profile's `cordis.patch.yml` (all optional):
     lang: auto           # auto | zh | en — language of the handoff and tool output;
                          # auto means "the UI request decides, command/tool entries fall back to zh"
     inheritReasoningEffort: warn   # warn = disclose in the footer only; inherit = also apply it
+    presetAdapter: auto  # auto | none | tavern — whether to record the binding in a
+                         # third-party preset ledger; see "Preset ledger" below
     sections:            # turn low-value sections off to shorten the handoff
       readFiles: true
       mentioned: true
@@ -317,7 +319,21 @@ Override in the profile's `cordis.patch.yml` (all optional):
       inject: 15000
 ```
 
-### Access boundary
+### Preset ledger
+
+What makes the new session actually use a persona is the DSH-side path: the plugin passes
+`presetId` as `agentPreset` at creation time and mounts it. Recording the binding in a
+third-party plugin's ledger (`session-bindings.json`) is a separate, optional step whose only
+purpose is to keep that plugin's panel in sync.
+
+That is why it can be turned off entirely:
+
+- `auto` (default) — record only when a `webServer` port is available; otherwise skip silently;
+- `none` — never touch another plugin's ledger (no HTTP call at all);
+- `tavern` — explicitly require it; if the port cannot be resolved, the commit still succeeds
+  but carries a `preset-adapter-unavailable` warning.
+
+## Access boundary
 
 All endpoints are loopback-only by default. DSH's web server binds `127.0.0.1`, but if you
 change that binding (LAN or phone access) these endpoints become reachable too — and they
@@ -431,7 +447,7 @@ exists" as the point of no return and never hides it behind an error:
 ```sh
 node test/extract.test.mjs   # extractor pure functions (42)
 node test/contract.test.mjs  # real-shape event fixture: anchors, sections, no reasoning/injected noise (4)
-node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status endpoints against a fake ctx (36)
+node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status endpoints and the preset-adapters against a fake ctx (39)
 node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)
 ```
 

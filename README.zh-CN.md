@@ -276,6 +276,8 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
     lang: auto           # auto | zh | en——交接单与工具返回文本的语言；
                          # auto 表示"界面请求说了算，命令/工具入口回落中文"
     inheritReasoningEffort: warn   # warn = 只在页脚披露；inherit = 同时也套用到新会话
+    presetAdapter: auto  # auto | none | tavern——是否把绑定登记进第三方预设账本；
+                         # 见下方「预设账本」
     sections:            # 关掉低信息量章节可以缩短交接单
       readFiles: true
       mentioned: true
@@ -291,6 +293,19 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
       workspace: 5000
       inject: 15000
 ```
+
+### 预设账本
+
+真正让新会话用上某个人格的是 DSH 侧那条路：创建时把 `presetId` 当 `agentPreset` 传进去
+并挂载。往第三方插件的账本（`session-bindings.json`）里登记绑定是另一件事，可选，
+唯一作用是让那个插件的面板显示得对。
+
+所以它可以被完全关掉：
+
+- `auto`（默认）：拿得到 `webServer` 端口才登记，拿不到静默跳过；
+- `none`：完全不碰第三方账本（一次 HTTP 都不发）；
+- `tavern`：显式要求；端口拿不到时提交仍然成功，但带上
+  `preset-adapter-unavailable` warning。
 
 ### 访问边界
 
@@ -384,7 +399,7 @@ DSH 升级后觉得哪里不对，先看这里。
 ```sh
 node test/extract.test.mjs   # 提取器纯函数（42）
 node test/contract.test.mjs  # 真实形状事件 fixture：锚点、章节，且不含推理与运行时注入（4）
-node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status 端点（36）
+node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status 端点与预设账本适配器（39）
 node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（7）
 ```
 

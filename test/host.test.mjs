@@ -1125,6 +1125,89 @@ test('preview 返回裁剪版锚点，客户端不必再读一遍会话日志', 
   assert.ok('lastTurn' in anchors)
 })
 
+// ── 预设账本适配器（P2-6）────────────────────────────────────────────────
+
+/**
+ * 预置一条 preset 绑定，并返回清理函数。
+ * @param {string} presetId - 绑定的预设 id。
+ * @returns {Function} 清理函数。
+ */
+function seedBinding(presetId) {
+  const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
+  mkdirSync(dirname(bindingsPath), { recursive: true })
+  writeFileSync(bindingsPath, JSON.stringify({
+    [SESSION_ID]: { mode: 'preset', presetId, source: 'legacy', at: 1, rev: 1 },
+  }))
+  return () => rmSync(dirname(bindingsPath), { recursive: true, force: true })
+}
+
+test("presetAdapter: 'none' 时一次 HTTP 都不发", async () => {
+  const cleanup = seedBinding('preset-demo-none')
+  const calls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return { ok: true, status: 200, async json() { return { ok: true } } }
+  }
+  try {
+    const handlers = new Map()
+    bootstrap({
+      sessionQuery: makeSessionQuery(sampleEvents()),
+      agents: { async create(options) { return { agent: { session: { id: options.sessionId, append() {} } } } } },
+      agentPresets: { async resolve(id) { return { id } }, async mount() {} },
+      webServer: { port: 19387, register(route) { handlers.set(route.path, route.handler); return () => {} } },
+    }, { startByDefault: false, presetAdapter: 'none' })
+
+    const commit = await call(handlers.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+    assert.equal(commit.status, 200)
+    assert.equal(calls.length, 0, 'none 模式下不允许任何第三方 HTTP 调用')
+    // DSH 侧的预设继承不受影响，仍然挂上了
+    assert.equal(commit.json.presetInherited, true)
+  } finally {
+    globalThis.fetch = originalFetch
+    cleanup()
+  }
+})
+
+test("显式 presetAdapter: 'tavern' 但拿不到端口时给出 warning", async () => {
+  const cleanup = seedBinding('preset-demo-explicit')
+  try {
+    const { routes } = bootstrap({
+      sessionQuery: makeSessionQuery(sampleEvents()),
+      agents: { async create(options) { return { agent: { session: { id: options.sessionId, append() {} } } } } },
+      agentPresets: { async resolve(id) { return { id } }, async mount() {} },
+      // 故意不提供 webServer
+    }, { startByDefault: false, presetAdapter: 'tavern' })
+
+    const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+    assert.equal(commit.status, 200)
+    assert.ok(
+      Array.isArray(commit.json.warnings) && commit.json.warnings.some((item) => item.code === 'preset-adapter-unavailable'),
+      '显式要了 tavern 却没登记成功，必须留下 warning',
+    )
+  } finally {
+    cleanup()
+  }
+})
+
+test('auto 模式且没有 webServer 时静默跳过，不产生 warning', async () => {
+  const cleanup = seedBinding('preset-demo-auto')
+  try {
+    const { routes } = bootstrap({
+      sessionQuery: makeSessionQuery(sampleEvents()),
+      agents: { async create(options) { return { agent: { session: { id: options.sessionId, append() {} } } } } },
+      agentPresets: { async resolve(id) { return { id } }, async mount() {} },
+    }, { startByDefault: false })
+    const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+    assert.equal(commit.status, 200)
+    const codes = (commit.json.warnings ?? []).map((item) => item.code)
+    assert.ok(!codes.includes('preset-adapter-unavailable'), 'auto 模式下探测不到属于常态，不该告警')
+  } finally {
+    cleanup()
+  }
+})
+
+
 //
 // sameOrigin 只挡浏览器跨站，挡不住"同一局域网里另一台机器"。这个插件的能力是
 // "往任意会话里写文本"，所以来源地址必须自己判，默认只认 loopback。
