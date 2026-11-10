@@ -260,19 +260,29 @@ async function runSelfTest(ctx) {
 /**
  * 解析 `/inherit` 的原始输入：`[<sessionId>] [--next <下一步>]`。
  *
- * 用显式 `--next` 标记而不是"把剩下的文本当下一步"：`/inherit 修复登录 bug`
- * 这种写法会被当成会话 id 直接报错，比默默猜错更清楚。下一步的文本允许带空格，
- * 一直延伸到输入结尾。
+ * 三种写法都要认：
+ *   `/inherit`                        → 继承当前会话
+ *   `/inherit 问她一句：…`            → 继承当前会话，**整串当"下一步"**
+ *   `/inherit session-xxx --next …`   → 指定源会话 + 下一步
+ *
+ * 中间那条以前是报错的：没有 `--next` 就把整串当会话 id，校验失败后回
+ * 「会话 id 不合法（问她一句：…）」。可那不是用户会写的东西——他在用自然语言
+ * 说"下一步做什么"，插件却把这句话当成 id 原文印回来。判据很干净：**长得不像
+ * 会话 id 的，就不可能是 id**，当下一步即可；是真 id 的照旧当 id。
  * @param {string} raw - 原始输入（已 trim）。
  * @returns {{sessionId: string, nextStep: string|undefined}} 解析结果。
  */
 function parseInheritArgs(raw) {
   if (raw.length === 0) return { sessionId: '', nextStep: undefined }
   const marker = raw.match(/(?:^|\s)--next(?:\s|$)/)
-  if (marker === null) return { sessionId: raw, nextStep: undefined }
-  const before = raw.slice(0, marker.index).trim()
-  const after = raw.slice(marker.index + marker[0].length).trim()
-  return { sessionId: before, nextStep: after.length > 0 ? after : undefined }
+  if (marker !== null) {
+    const before = raw.slice(0, marker.index).trim()
+    const after = raw.slice(marker.index + marker[0].length).trim()
+    return { sessionId: before, nextStep: after.length > 0 ? after : undefined }
+  }
+  const trimmed = raw.trim()
+  if (SESSION_ID_RE.test(trimmed)) return { sessionId: trimmed, nextStep: undefined }
+  return { sessionId: '', nextStep: trimmed }
 }
 
 // ── 挂载 ──────────────────────────────────────────────────────────────────
@@ -433,7 +443,7 @@ export function apply(ctx, config = {}) {
     try {
       sub.commands.register({
         name: 'inherit',
-        description: '把当前会话（或指定会话）的具体锚点提取成交接单，在一个全新会话里继续工作；不复制旧对话历史，也不调用 LLM。不带参数时继承当前会话。',
+        description: '把当前会话（或指定会话）的具体锚点提取成交接单，在一个全新会话里继续工作；不复制旧对话历史，也不调用 LLM。不带参数时继承当前会话；直接跟一段文字时，这段文字会作为新会话的「下一步」。',
         input: { hint: '[<sessionId>] [--next <下一步>]' },
         async handler(invocation) {
           const agentSession = invocation !== null && invocation !== undefined && invocation.agent !== undefined

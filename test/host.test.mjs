@@ -352,10 +352,18 @@ test('/inherit 支持 --next 指定下一步', async () => {
   assert.equal(explicit.kind, 'success')
   assert.match(appended[0].data.content[0].text, /换个文件继续/)
 
-  // 没有 --next 的裸文本只可能是会话 id，不合法就如实报错（不猜成"下一步"）。
-  const bad = await spec.handler({ rawInput: '修复登录 bug', agent: { session: { id: SESSION_ID } } })
-  assert.equal(bad.kind, 'error')
-  assert.match(bad.text, /不合法/)
+  // 裸文本（长得不像会话 id）：整串当"下一步"，继承当前会话。
+  // 以前这里会报「会话 id 不合法（修复登录 bug）」——把用户的自然语言当成 id 印回来。
+  appended.length = 0
+  const bare = await spec.handler({ rawInput: '修复登录 bug', agent: { session: { id: SESSION_ID } } })
+  assert.equal(bare.kind, 'success', '不像会话 id 的裸文本应当被当成下一步')
+  assert.match(appended[0].data.content[0].text, /修复登录 bug/)
+
+  // 合法会话 id 照旧当 id（此时"当前会话"是另一个，用来确认走的是 id 而不是当前会话）。
+  appended.length = 0
+  const byId = await spec.handler({ rawInput: SESSION_ID, agent: { session: { id: 'session-99999999-8888-7777-6666-555555555555' } } })
+  assert.equal(byId.kind, 'success')
+  assert.match(byId.text, /继承完成：新会话/)
 })
 
 test('客户端回传 doc 时，独立填写的 nextStep 也会写进交接单', async () => {
