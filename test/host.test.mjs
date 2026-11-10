@@ -910,6 +910,32 @@ test('预设绑定是对象格式时也要读到（回归：虚拟空间预设�
   }
 })
 
+// 命令 / 工具入口以前不传标题，新会话一律叫「继承: 会话」。事件流里有
+// session/title，可以派生。链式继承还会一代代累积「继承: 继承: 继承: X」，
+// 所以派生时要把历史前缀剥掉，标题只留一层。
+test('标题从源会话事件派生，并剥掉历史继承前缀', async () => {
+  const renamed = []
+  const registered = []
+  const events = [
+    ...sampleEvents(),
+    { type: 'session/title', seq: 90, time: 1_700_000_010_000, data: { title: '继承: 继承: 武器贴图修复' } },
+  ]
+  bootstrap({
+    sessionQuery: makeSessionQuery(events),
+    agents: { async create(options) { return { agent: { session: { id: options.sessionId, async append() {} } } } } },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename(_session, title) { renamed.push(title) } },
+    commands: { register(spec) { registered.push(spec); return () => {} } },
+  })
+
+  const command = registered.find((spec) => spec.name === 'inherit')
+  assert.ok(command !== undefined, '/inherit 未注册')
+  const result = await command.handler({ rawInput: SESSION_ID, agent: { session: { id: SESSION_ID } } })
+  assert.equal(result.kind, 'success')
+  assert.equal(renamed.length, 1)
+  assert.equal(renamed[0], '继承: 武器贴图修复', '历史前缀必须被剥掉，不能越继承越长')
+})
+
 test("绑定是 mode:'none' 时不当成有绑定，回退 header 的预设", async () => {
   const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
   mkdirSync(dirname(bindingsPath), { recursive: true })

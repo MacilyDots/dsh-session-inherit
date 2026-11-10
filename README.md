@@ -77,10 +77,13 @@ readability (they are not part of the output).
 
 > Source: `session-xxx` (title) · 15 turns · last activity 2026-10-08 19:37
 > **Rules**: do not restate this document…
+> Last state: turn 12 still running (the source session has not stopped…)
 
-## Task                          ← the source session's first real user message
+## Task                          ← the first message that looks like a request, not a greeting
 ## Files edited (written/modified by the source session, most recent first)   ← edit/write `file_path`
+## Attachments (present in the source session, not copied)   ← names and sizes only, never contents
 ## Recent failures (last tool errors in the source session — check whether they are already resolved)   ← turn + error code
+## Run this first (the source session's most recent verification command)   ← single-line commands only
 ## Recent user instructions (oldest first)   ← verbatim `source.kind === 'user'` messages
 ## Files read (read-only, never modified)
 ## Paths mentioned in text (scraped from tool-argument bodies; may be noise)
@@ -90,6 +93,21 @@ readability (they are not part of the output).
 ## Source session's last reply
 ## Next step                     ← written by you in the preview box
 ```
+
+A few sections exist so the new session does not waste its first steps:
+
+- **Last state** appears only when the last turn did not end normally (`aborted`, `error`,
+  `max-tokens`, `blocked`, or still running). A source session that is still live reads as
+  "still running" — its log genuinely ends mid-turn.
+- **Task** skips pure greetings ("hi", "你好") in the first five user messages and takes the
+  first one that looks like a request. If every message is a short opener it falls back to
+  the first one and says so in the handoff.
+- **Run this first** picks the most recent single-line verification-ish command
+  (`npm test`, `cargo test`, `tsc`, …) and removes it from "Recent commands" so it is not
+  listed twice. Multi-line scripts are skipped — they cannot be re-run as one command.
+- **Attachments** lists image/file names with media type and size. Contents are never copied.
+- On chained inheritance (A→B→C) the task statement is taken from the previous handoff, so the
+  original task survives instead of being replaced by "the first instruction after inheriting".
 
 Section headings carry **no numbers**. Numbering used to be hard-coded per section and
 drifted whenever a section happened to be empty: the client hint said `## 7. 下一步` while

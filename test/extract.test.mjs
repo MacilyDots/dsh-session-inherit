@@ -12,6 +12,7 @@ import {
   clip,
   DOC_MARK,
 } from '../lib/extract.mjs'
+import { markMissingFiles } from '../lib/read.mjs'
 
 const path = 'X:\\work\\demo\\package.json'
 
@@ -606,3 +607,104 @@ test('annotatePresetLine 按实际结果把页脚写成事实', () => {
   const en = annotatePresetLine('---\nWorking directory: `X:\\work\\demo` · Preset: preset-demo-0001\n', { lang: 'en', inheritPreset: true, mounted: true })
   assert.match(en, /inherited by the new session/)
 })
+
+// ── 0.6.2：提取质量批次 ────────────────────────────────────────────────────
+
+test('lastTurn 读最后一条 turn/end，并区分「仍在进行中」', () => {
+  const start = [{ type: 'turn/start', seq: 1, time: 1, data: { turn: 3 } }]
+  const end = (kind, extra = {}) => ({ type: 'turn/end', seq: 2, time: 2, data: { turn: 3, reason: { kind, ...extra } } })
+
+  assert.deepEqual(collectAnchors([...start, end('completed')]).lastTurn, { state: 'completed', turn: 3, cause: '' })
+  assert.deepEqual(
+    collectAnchors([...start, end('aborted', { reason: { kind: 'user' } })]).lastTurn,
+    { state: 'aborted', turn: 3, cause: 'user' },
+  )
+  assert.equal(collectAnchors([...start, end('error', { error: { code: 'TRANSPORT' } })]).lastTurn.state, 'error')
+  // 只有 turn/start 没有 turn/end：live 源会话读出来就是这样，必须区别于"正常结束"。
+  assert.deepEqual(collectAnchors(start).lastTurn, { state: 'open', turn: 3, cause: '' })
+})
+
+test('首条是寒暄时任务目标取后面那条正式需求', () => {
+  const events = [
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [{ type: 'text', text: '你好' }] } },
+    { type: 'user/message', seq: 3, time: 3, data: { content: [{ type: 'text', text: '帮我把 demo 的武器贴图批量重命名并更新 meta 文件' }] } },
+  ]
+  const anchors = collectAnchors(events)
+  assert.match(anchors.task.text, /武器贴图/)
+  assert.equal(anchors.task.weak, false)
+})
+
+test('全是短寒暄时回退第一条，并如实标注偏弱', () => {
+  const events = [{ type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: '在吗' }] } }]
+  const anchors = collectAnchors(events)
+  assert.equal(anchors.task.text, '在吗')
+  assert.equal(anchors.task.weak, true)
+  const doc = composeInheritDoc({ sessionId: 'session-x', cwd: 'X:\\p' }, anchors, {})
+  assert.match(doc, /任务陈述可能偏弱/)
+})
+
+test('markMissingFiles 只对可信来源判存在性', () => {
+  const anchors = {
+    edited: [],
+    read: [],
+    mentioned: [
+      { path: 'X:\\p\\a.cs', source: 'regex', absolute: true },
+      { path: 'X:\\p\\b.cs', source: 'quoted', absolute: true },
+    ],
+  }
+  markMissingFiles(anchors)
+  assert.equal(anchors.mentioned[0].missing, undefined, '正则扫出的路径可能只是截断版，不能判存在性')
+  assert.equal(anchors.mentioned[1].missing, true, '引号包裹的完整路径照判')
+})
+
+test('挑最近的单行验证命令，并从「最近执行的命令」里去掉重复', () => {
+  const events = [
+    { type: 'tool/call', seq: 1, time: 1, data: { callId: 'c1', name: 'pwsh', arguments: JSON.stringify({ command: 'npm test' }) } },
+    { type: 'tool/call', seq: 2, time: 2, data: { callId: 'c2', name: 'pwsh', arguments: JSON.stringify({ command: '$p=1\nif($p){run}' }) } },
+  ]
+  const anchors = collectAnchors(events)
+  assert.equal(anchors.verifyCommand, 'npm test', '多行脚本不能当「建议先验证」')
+  const doc = composeInheritDoc({ sessionId: 'session-x', cwd: 'X:\\p' }, anchors, {})
+  assert.match(doc, /建议先验证/)
+  // 同一命令不该在「最近执行的命令」里再出现一次
+  assert.equal((doc.match(/npm test/g) ?? []).length, 1)
+})
+
+test('图片与文件附件进入交接单，名字从 attachment 里取', () => {
+  const events = [{
+    type: 'user/message',
+    seq: 1,
+    time: 1,
+    data: {
+      content: [
+        { type: 'text', text: '看这张图' },
+        { type: 'image', attachment: { attachmentId: 'sha256:x', mediaType: 'image/png', width: 1920, height: 1080, bytes: 329_650, name: 'image.png' } },
+        { type: 'file', attachment: { attachmentId: 'sha256:y', name: '报告.docx', bytes: 18_422 } },
+      ],
+    },
+  }]
+  const anchors = collectAnchors(events)
+  assert.equal(anchors.attachments.length, 2)
+  assert.equal(anchors.attachments[0].kind, 'image')
+  assert.equal(anchors.attachments[0].name, 'image.png')
+  assert.equal(anchors.attachments[1].name, '报告.docx')
+  const doc = composeInheritDoc({ sessionId: 'session-x', cwd: 'X:\\p' }, anchors, {})
+  assert.match(doc, /附件/)
+  assert.match(doc, /报告\.docx/)
+})
+
+test('链式继承时任务目标取自上一份交接单', () => {
+  const oldDoc = `${DOC_MARK}\n\n## 任务目标\n把 demo 的武器贴图修好并重新打包\n\n## 下一步\n跑 npm test`
+  const events = [
+    { type: 'user/message', seq: 1, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: oldDoc }] } },
+    { type: 'user/message', seq: 2, time: 2, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '继续之前那件事' }] } },
+  ]
+  const anchors = collectAnchors(events)
+  assert.equal(anchors.inheritedCount, 1)
+  const doc = composeInheritDoc({ sessionId: 'session-x', cwd: 'X:\\p' }, anchors, {})
+  assert.match(doc, /继承链：这是第 1 次继承/)
+  assert.match(doc, /把 demo 的武器贴图修好并重新打包/)
+  assert.match(doc, /继续之前那件事/)
+})
+
