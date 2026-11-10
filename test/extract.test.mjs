@@ -13,6 +13,7 @@ import {
   DOC_MARK,
 } from '../lib/extract.mjs'
 import { markMissingFiles } from '../lib/read.mjs'
+import { renderSessionTimeline } from '../lib/session-read.mjs'
 
 const path = 'X:\\work\\demo\\package.json'
 
@@ -707,4 +708,50 @@ test('链式继承时任务目标取自上一份交接单', () => {
   assert.match(doc, /把 demo 的武器贴图修好并重新打包/)
   assert.match(doc, /继续之前那件事/)
 })
+
+// ── 0.7.x：配置面 / 推理强度 / timeline ───────────────────────────────────
+
+test('sections 开关能关掉低信息量章节', () => {
+  const anchors = collectAnchors(sampleEvents())
+  const source = { sessionId: 'session-x', cwd: 'X:\\p' }
+  const full = composeInheritDoc(source, anchors, {})
+  const trimmed = composeInheritDoc(source, anchors, {
+    sections: { readFiles: false, mentioned: false, relativeRefs: false, commands: false },
+  })
+  assert.ok(trimmed.length < full.length, '关掉章节应当更短')
+  assert.match(full, /## 最近执行的命令/)
+  assert.doesNotMatch(trimmed, /## 最近执行的命令/)
+  assert.doesNotMatch(trimmed, /## 读过的文件/)
+  // 高价值章节不受影响
+  assert.match(trimmed, /## 任务目标/)
+})
+
+test('推理强度写进页脚（只披露，不改新会话）', () => {
+  const anchors = collectAnchors(sampleEvents())
+  const doc = composeInheritDoc({
+    sessionId: 'session-x',
+    cwd: 'X:\\p',
+    model: 'p/m',
+    reasoningEffort: 'high',
+  }, anchors, {})
+  assert.match(doc, /推理强度：high/)
+})
+
+test('timeline 从头按序，且支持 offset 翻页', () => {
+  const events = [
+    { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: '第一条' }] } },
+    { type: 'assistant/message', seq: 2, time: 2, data: { message: { content: [{ type: 'text', text: '第二条' }] } } },
+    { type: 'user/message', seq: 3, time: 3, data: { content: [{ type: 'text', text: '第三条' }] } },
+  ]
+  const page1 = renderSessionTimeline('session-x', {}, events, { limit: 2, offset: 0 })
+  const page2 = renderSessionTimeline('session-x', {}, events, { limit: 2, offset: 2 })
+  assert.match(page1, /第一条/)
+  assert.match(page1, /第二条/)
+  assert.doesNotMatch(page1, /第三条/)
+  assert.match(page2, /第三条/)
+  assert.doesNotMatch(page2, /第一条/)
+  // 英文界面下文案跟语言走
+  assert.match(renderSessionTimeline('session-x', {}, events, { limit: 1 }, 'en'), /Timeline of session/)
+})
+
 

@@ -1,0 +1,120 @@
+[
+  {
+    "type": "turn/start",
+    "seq": 1,
+    "time": 1700000000000,
+    "data": { "turn": 1 }
+  },
+  {
+    "type": "user/message",
+    "seq": 2,
+    "time": 1700000001000,
+    "data": {
+      "source": { "kind": "user" },
+      "content": [{ "type": "text", "text": "帮我把 X:\\work\\demo 的武器贴图批量重命名，并更新对应的 meta 文件" }]
+    }
+  },
+  {
+    "type": "user/message",
+    "seq": 3,
+    "time": 1700000001500,
+    "data": {
+      "source": { "kind": "agent-instructions" },
+      "content": [{ "type": "text", "text": "这里是运行时注入的指令，不该被当成用户消息" }]
+    }
+  },
+  {
+    "type": "assistant/message",
+    "seq": 4,
+    "time": 1700000002000,
+    "data": {
+      "message": {
+        "content": [
+          { "type": "reasoning", "text": "这段推理不该进交接单" },
+          { "type": "text", "text": "先看一下目录结构。" }
+        ]
+      }
+    }
+  },
+  {
+    "type": "tool/call",
+    "seq": 5,
+    "time": 1700000003000,
+    "data": {
+      "callId": "c1",
+      "name": "read",
+      "arguments": "{\"path\":\"X:\\\\work\\\\demo\\\\package.json\"}"
+    }
+  },
+  {
+    "type": "tool/call",
+    "seq": 6,
+    "time": 1700000004000,
+    "data": {
+      "callId": "c2",
+      "name": "write",
+      "arguments": "{\"file_path\":\"X:\\\\work\\\\demo\\\\art\\\\weapon.png.meta\",\"content\":\"guid: 0123\"}"
+    }
+  },
+  {
+    "type": "tool/call",
+    "seq": 7,
+    "time": 1700000005000,
+    "data": {
+      "callId": "c3",
+      "name": "pwsh",
+      "arguments": "{\"command\":\"npm test\"}"
+    }
+  },
+  {
+    "type": "tool/call",
+    "seq": 8,
+    "time": 1700000006000,
+    "data": {
+      "callId": "c4",
+      "name": "todo_write",
+      "arguments": "{\"todos\":[{\"content\":\"改贴图\",\"status\":\"in_progress\"},{\"content\":\"跑测试\",\"status\":\"pending\"}]}"
+    }
+  },
+  {
+    "type": "tool/result",
+    "seq": 9,
+    "time": 1700000007000,
+    "data": {
+      "turn": 1,
+      "message": { "toolCallId": "c1", "content": [{ "type": "text", "text": "ok" }] }
+    }
+  },
+  {
+    "type": "tool/result",
+    "seq": 10,
+    "time": 1700000008000,
+    "data": {
+      "turn": 1,
+      "error": { "code": "FS_STALE_VERSION" },
+      "message": {
+        "toolCallId": "c2",
+        "isError": true,
+        "content": [{ "type": "text", "text": "Error: file changed since it was read" }]
+      }
+    }
+  },
+  {
+    "type": "turn/end",
+    "seq": 11,
+    "time": 1700000009000,
+    "data": { "turn": 1, "reason": { "kind": "completed" } }
+  },
+  {
+    "type": "session/title",
+    "seq": 12,
+    "time": 1700000010000,
+    "data": { "title": "武器贴图批量重命名" }
+  },
+  {
+    "type": "compaction/start",
+    "seq": 13,
+    "time": 1700000011000,
+    "data": {}
+  }
+]

@@ -18,11 +18,13 @@ process.env.DSH_HOME = join(tmpdir(), 'dsh-session-inherit-test-home')
 // 上一次失败运行留下的残留会让这次出现"ppreset 凭空变成 preset-x"这类假失败。
 rmSync(process.env.DSH_HOME, { recursive: true, force: true })
 const { apply, name: pluginName, inject } = await import('../index.mjs')
+const { allowRequest } = await import('../lib/security.mjs')
 
 const PREVIEW = '/__session-inherit/preview'
 const COMMIT = '/__session-inherit/commit'
 const RETRY = '/__session-inherit/retry'
 const HEALTH = '/__session-inherit/health'
+const STATUS = '/__session-inherit/status'
 
 const SESSION_ID = 'session-11111111-2222-3333-4444-555555555555'
 
@@ -71,11 +73,14 @@ function makeSessionQuery(events, header = {}) {
   }
 }
 
-function makeRequest(method, payload) {
+function makeRequest(method, payload, url = '/') {
   const handlers = {}
   const req = {
     method,
+    url,
     headers: { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' },
+    // 真实请求一定带 socket；allowRequest 靠它判来源，缺了就 fail closed。
+    socket: { remoteAddress: '127.0.0.1' },
     on(event, callback) {
       handlers[event] = handlers[event] ?? []
       handlers[event].push(callback)
@@ -146,9 +151,9 @@ function bootstrap(services = {}, config = { cacheTtlMs: 0 }) {
   return { routes, ctx, webServer }
 }
 
-async function call(handler, method, payload) {
+async function call(handler, method, payload, url) {
   const res = makeResponse()
-  await handler(makeRequest(method, payload), res)
+  await handler(makeRequest(method, payload, url), res)
   return { status: res.status, json: res.body.length > 0 ? JSON.parse(res.body) : null }
 }
 
@@ -625,6 +630,7 @@ function makeChunkedRequest(method, owned, cutAt) {
   const req = {
     method,
     headers: { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' },
+    socket: { remoteAddress: '127.0.0.1' },
     destroyed: false,
     on(event, callback) {
       handlers[event] = handlers[event] ?? []
@@ -1082,5 +1088,70 @@ test('非 failed 状态的记录拒绝重试，未知会话也拒绝', async () 
   assert.equal(unknown.status, 409)
   assert.equal(unknown.json.code, 'unknown-child')
 })
+
+// ── 最近继承状态（P2-9）与 preview 锚点（P2-7）────────────────────────────
+
+test('status 能按子会话查刚完成的继承，列表也能列出来', async () => {
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: { async create(options) { return { agent: { session: { id: options.sessionId, append() {} } } } } },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  }, { startByDefault: false })
+  const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+  assert.equal(commit.status, 200)
+  const childId = commit.json.sessionId
+
+  const one = await call(routes.get(STATUS), 'GET', undefined, `${STATUS}?sessionId=${childId}`)
+  assert.equal(one.status, 200)
+  assert.equal(one.json.found, true)
+  assert.equal(one.json.entry.sourceId, SESSION_ID)
+
+  const list = await call(routes.get(STATUS), 'GET', undefined, STATUS)
+  assert.equal(list.status, 200)
+  assert.ok(list.json.count >= 1)
+  assert.ok(list.json.entries.some((item) => item.sessionId === childId))
+})
+
+test('preview 返回裁剪版锚点，客户端不必再读一遍会话日志', async () => {
+  const { routes } = bootstrap({ sessionQuery: makeSessionQuery(sampleEvents()) })
+  const preview = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
+  assert.equal(preview.status, 200)
+  const anchors = preview.json.anchors
+  assert.ok(anchors !== null && typeof anchors === 'object', 'preview 必须带 anchors')
+  assert.equal(typeof anchors.task.text, 'string')
+  assert.ok(Array.isArray(anchors.edited))
+  assert.ok(Array.isArray(anchors.todos))
+  assert.ok('lastTurn' in anchors)
+})
+
+//
+// sameOrigin 只挡浏览器跨站，挡不住"同一局域网里另一台机器"。这个插件的能力是
+// "往任意会话里写文本"，所以来源地址必须自己判，默认只认 loopback。
+
+test('allowRequest 只放行 loopback，远程必须开 allowRemote 且带 token', () => {
+  const at = (address, headers = {}) => ({ socket: { remoteAddress: address }, headers })
+  const local = { allowRemote: false, token: '' }
+
+  assert.equal(allowRequest(at('127.0.0.1'), local).ok, true)
+  assert.equal(allowRequest(at('::1'), local).ok, true)
+  assert.equal(allowRequest(at('::ffff:127.0.0.1'), local).ok, true, '双栈 socket 的 IPv4 映射形态')
+  assert.equal(allowRequest(at('127.0.0.53'), local).ok, true, '127.0.0.0/8 整段都算本机')
+
+  const blocked = allowRequest(at('192.168.1.20'), local)
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.reason, 'remote-not-allowed')
+
+  // 开了 allowRemote 但没配 token 也不行——那等于对局域网公开。
+  assert.equal(allowRequest(at('192.168.1.20'), { allowRemote: true, token: '' }).reason, 'remote-without-token')
+
+  const seeded = { allowRemote: true, token: 'x'.repeat(20) }
+  assert.equal(allowRequest(at('192.168.1.20', { 'x-session-inherit-token': seeded.token }), seeded).ok, true)
+  assert.equal(allowRequest(at('192.168.1.20', { 'x-session-inherit-token': 'wrong' }), seeded).status, 401)
+
+  // 拿不到来源地址：fail closed，不能默认放行。
+  assert.equal(allowRequest({ headers: {} }, local).reason, 'unknown-remote-address')
+})
+
 
 

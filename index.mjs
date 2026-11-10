@@ -23,16 +23,16 @@
 // 全部按需查找，缺一个就降级一项，不让整个插件失活。
 
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
-import { EVENTS, inspectBindings, ownVersion, probe, SERVICES } from './lib/contracts.mjs'
+import { EVENTS, inspectBindings, ownVersion, probe } from './lib/contracts.mjs'
 import { DOC_MARK, formatTime } from './lib/extract.mjs'
 import { resolveConfig } from './lib/config.mjs'
 import { InheritError, inheritSession, retryInjection } from './lib/inherit.mjs'
 import { readInheritedBy } from './lib/history.mjs'
 import { note, selfTestFlag } from './lib/log.mjs'
 import { buildDoc, derivedCacheStats, getSeenEvents, readSnapshot } from './lib/read.mjs'
-import { readBody, sameOrigin, sendJson } from './lib/security.mjs'
+import { allowRequest, readBody, sameOrigin, sendJson } from './lib/security.mjs'
 import { createChild, renameChild } from './lib/session.mjs'
-import { renderSessionSearch, renderSessionSummary, renderSessionTail } from './lib/session-read.mjs'
+import { renderSessionSearch, renderSessionSummary, renderSessionTail, renderSessionTimeline } from './lib/session-read.mjs'
 import { withTimeout } from './lib/timeouts.mjs'
 
 export const name = 'dsh-session-inherit'
@@ -56,6 +56,11 @@ async function handlePreview(ctx, resolved, req, res) {
   note(`preview hit method=${req.method} origin=${req.headers?.origin ?? '(none)'} host=${req.headers?.host ?? '(none)'} len=${req.headers?.['content-length'] ?? '?'}`)
   if (req.method !== 'POST') {
     sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  const gate = allowRequest(req, resolved)
+  if (gate.ok !== true) {
+    sendJson(res, gate.status, { ok: false, error: gate.reason })
     return
   }
   if (!sameOrigin(req)) {
@@ -87,6 +92,7 @@ async function handlePreview(ctx, resolved, req, res) {
       // 是一份它和用户都不认识的外语正文。
       lang: typeof args?.lang === 'string' ? args.lang : undefined,
       cacheTtlMs: resolved.cacheTtlMs,
+      sections: resolved.sections,
     }), resolved.previewTimeoutMs, '读取源会话')
     sendJson(res, 200, {
       ok: true,
@@ -110,6 +116,19 @@ async function handlePreview(ctx, resolved, req, res) {
         inheritedCount: built.anchors.inheritedCount,
       },
       route: built.route,
+      // 裁剪版锚点：客户端或第三方要自己画摘要时不必再读一遍会话日志。
+      // 只给路径与计数，不给文件内容；task 截到与交接单一致的上限。
+      anchors: {
+        task: built.anchors.task === null
+          ? null
+          : { text: built.anchors.task.text.slice(0, 1200), weak: built.anchors.task.weak === true },
+        edited: built.anchors.edited.slice(0, 20).map((file) => ({ path: file.path, hits: file.hits, missing: file.missing === true })),
+        failures: built.anchors.failures.slice(0, 8).map((item) => ({ tool: item.tool, code: item.code, turn: item.turn })),
+        todos: built.anchors.todos.slice(0, 20),
+        lastTurn: built.anchors.lastTurn ?? null,
+        attachments: Array.isArray(built.anchors.attachments) ? built.anchors.attachments : [],
+        verifyCommand: typeof built.anchors.verifyCommand === 'string' ? built.anchors.verifyCommand : null,
+      },
       // 有没有自定义预设绑定：界面据此决定要不要提「继承当前对话的预设」这件事。
       boundPreset: built.boundPreset ?? null,
       // 这个会话以前被继承过几次：在用户即将再次继承时提示，防止重复继承。
@@ -132,6 +151,11 @@ async function handleCommit(ctx, resolved, req, res) {
   note(`commit hit method=${req.method} origin=${req.headers?.origin ?? '(none)'} host=${req.headers?.host ?? '(none)'} len=${req.headers?.['content-length'] ?? '?'}`)
   if (req.method !== 'POST') {
     sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  const gate = allowRequest(req, resolved)
+  if (gate.ok !== true) {
+    sendJson(res, gate.status, { ok: false, error: gate.reason })
     return
   }
   if (!sameOrigin(req)) {
@@ -168,6 +192,15 @@ async function handleCommit(ctx, resolved, req, res) {
       lang: typeof args?.lang === 'string' ? args.lang : undefined,
       source: 'http',
     }, resolved)
+    recordRecentInherit({
+      sessionId: result.sessionId,
+      sourceId: sessionId,
+      at: Date.now(),
+      state: String(result.state ?? 'created'),
+      mode: String(result.mode ?? ''),
+      warnings: Array.isArray(result.warnings) ? result.warnings.length : 0,
+      preset: typeof result.preset === 'string' ? result.preset : null,
+    })
     sendJson(res, 200, {
       ok: true,
       sessionId: result.sessionId,
@@ -192,6 +225,67 @@ async function handleCommit(ctx, resolved, req, res) {
   }
 }
 
+// ── 最近继承状态（内存，重启即丢）─────────────────────────────────────────
+
+/** @type {Map<string, {sessionId: string, sourceId: string, at: number, state: string, mode: string, warnings: number, preset: string|null}>} */
+const recentInherits = new Map()
+const RECENT_LIMIT = 20
+
+/**
+ * 记一条最近完成的继承。
+ * @param {object} entry - 记录。
+ */
+function recordRecentInherit(entry) {
+  recentInherits.set(entry.sessionId, entry)
+  if (recentInherits.size > RECENT_LIMIT) {
+    const oldest = [...recentInherits.values()].sort((a, b) => a.at - b.at)[0]
+    if (oldest !== undefined) recentInherits.delete(oldest.sessionId)
+  }
+}
+
+/**
+ * 继承状态查询：`GET /__session-inherit/status?sessionId=`。
+ *
+ * 和账本（history.json，持久）互补：这里回答"刚刚那次继承到哪一步了"，
+ * 不需要等用户去翻日志。只存在于内存，重启即清空——它本来就是运行期视图。
+ * @param {object} ctx - Cordis 上下文（未使用，保持签名一致）。
+ * @param {object} resolved - 归一化配置。
+ * @param {import('node:http').IncomingMessage} req - 请求。
+ * @param {import('node:http').ServerResponse} res - 响应。
+ */
+function handleStatus(ctx, resolved, req, res) {
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  const gate = allowRequest(req, resolved)
+  if (gate.ok !== true) {
+    sendJson(res, gate.status, { ok: false, error: gate.reason })
+    return
+  }
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { ok: false, error: 'forbidden' })
+    return
+  }
+  let sessionId = ''
+  try {
+    sessionId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('sessionId') ?? ''
+  } catch {
+    sessionId = ''
+  }
+  if (sessionId.length > 0) {
+    if (!SESSION_ID_RE.test(sessionId)) {
+      sendJson(res, 400, { ok: false, error: `invalid session id: ${sessionId}` })
+      return
+    }
+    const entry = recentInherits.get(sessionId)
+    sendJson(res, 200, { ok: true, found: entry !== undefined, entry: entry ?? null })
+    return
+  }
+  const entries = [...recentInherits.values()].sort((a, b) => b.at - a.at)
+  sendJson(res, 200, { ok: true, count: entries.length, entries })
+}
+
 // ── 重试注入 ──────────────────────────────────────────────────────────────
 
 /**
@@ -207,6 +301,11 @@ async function handleCommit(ctx, resolved, req, res) {
 async function handleRetry(ctx, resolved, req, res) {
   if (req.method !== 'POST') {
     sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  const gate = allowRequest(req, resolved)
+  if (gate.ok !== true) {
+    sendJson(res, gate.status, { ok: false, error: gate.reason })
     return
   }
   if (!sameOrigin(req)) {
@@ -232,6 +331,15 @@ async function handleRetry(ctx, resolved, req, res) {
       doc: typeof args?.doc === 'string' ? args.doc : undefined,
       start: typeof args?.start === 'boolean' ? args.start : true,
     }, resolved)
+    recordRecentInherit({
+      sessionId: result.sessionId,
+      sourceId: '',
+      at: Date.now(),
+      state: 'injected',
+      mode: result.mode,
+      warnings: Array.isArray(result.warnings) ? result.warnings.length : 0,
+      preset: null,
+    })
     sendJson(res, 200, { ok: true, ...result })
   } catch (error) {
     const status = error instanceof InheritError
@@ -262,6 +370,11 @@ async function handleRetry(ctx, resolved, req, res) {
 function handleHealth(ctx, resolved, req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendJson(res, 405, { ok: false, error: 'method not allowed' })
+    return
+  }
+  const gate = allowRequest(req, resolved)
+  if (gate.ok !== true) {
+    sendJson(res, gate.status, { ok: false, error: gate.reason })
     return
   }
   if (!sameOrigin(req)) {
@@ -394,10 +507,10 @@ export function apply(ctx, config = {}) {
   const resolved = resolveConfig(config)
   if (!resolved.enabled) return
 
-  // 启动时做一次契约探测并写日志：缺哪个服务、跨插件账本是什么格式。
-  // 这次预设失效就是"格式换了、我们静默读不到"，日志里有一行就能少查半天。
-  const probed = probe(ctx)
-  note(`probe: 服务 ${probed.available.length}/${SERVICES.length} 可用${probed.missing.length > 0 ? `，缺 ${probed.missing.join(', ')}` : ''}`)
+  // 启动时只记跨插件账本的格式——那是文件系统事实，与注册时机无关。
+  // **不要**在这里探测服务清单：apply 阶段很多服务还没注册（本机实测启动瞬间
+  // 只有 4/10 可用，但插件随后完全正常），写进日志只会误导排查。服务状态是
+  // 运行期事实，交给 health 端点（见 handleHealth）。
   const bindings = inspectBindings()
   note(`probe: bindings state=${bindings.state} entries=${bindings.entries} (object=${bindings.object} legacy=${bindings.legacy} none=${bindings.none} invalid=${bindings.invalid})`)
 
@@ -429,6 +542,11 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: `${ROUTE_PREFIX}/health`,
       handler: (req, res) => handleHealth(ctx, resolved, req, res),
+    }))
+    host.effect(() => webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/status`,
+      handler: (req, res) => handleStatus(ctx, resolved, req, res),
     }))
   }
 
@@ -475,6 +593,8 @@ export function apply(ctx, config = {}) {
                 start: typeof args?.start === 'boolean' ? args.start : resolved.startByDefault,
                 inheritPreset: true,
                 source: 'tool',
+                // 工具入口没有界面上下文，语言只能来自配置（auto 就回落中文）。
+                lang: resolved.lang === 'auto' ? undefined : resolved.lang,
               }, resolved)
               const lines = [
                 `继承完成：新会话 ${result.sessionId}`,
@@ -510,14 +630,16 @@ export function apply(ctx, config = {}) {
       if (tools === undefined || typeof tools.register !== 'function') return
       const disposer = tools.register({
         name: 'session_read',
-        description: '读取任意 DSH 会话的日志（含已冷掉的会话），用于回查「继承」交接单首行那个源会话。三种模式：search（默认，按关键词搜索并给出命中上下文）、summary（结构化摘要：任务目标 / 改过的文件 / 最近失败 / 待办 / 最后一次回复）、tail（最后 N 个事件）。只读，不创建也不修改任何东西。',
+        description: '读取任意 DSH 会话的日志（含已冷掉的会话），用于回查「继承」交接单首行那个源会话。四种模式：search（默认，按关键词搜索并给出命中上下文）、summary（结构化摘要：任务目标 / 改过的文件 / 最近失败 / 待办 / 最后一次回复）、tail（最后 N 个事件）、timeline（从头按序看，支持 offset 分页）。只读，不创建也不修改任何东西。',
         parameters: {
           type: 'object',
           properties: {
             sessionId: { type: 'string', description: '会话 id，形如 session-<uuid>——就是继承单首行「来源」里那个。' },
-            mode: { type: 'string', enum: ['search', 'summary', 'tail'], description: 'search=关键词搜索（默认）；summary=结构化摘要；tail=最后若干事件。' },
+            mode: { type: 'string', enum: ['search', 'summary', 'tail', 'timeline'], description: 'search=关键词搜索（默认）；summary=结构化摘要；tail=最后若干事件；timeline=从头按序、可用 offset 翻页。' },
             query: { type: 'string', description: 'mode=search 时的关键词，不区分大小写。' },
             limit: { type: 'number', description: '返回条数上限，默认 20，最大 100。' },
+            offset: { type: 'number', description: 'mode=timeline 时的起始偏移（从 0 开始），用于翻页。' },
+            lang: { type: 'string', enum: ['zh', 'en'], description: '返回文本的语言；不填则跟随插件配置（默认中文）。' },
           },
           required: ['sessionId'],
           additionalProperties: false,
@@ -530,14 +652,18 @@ export function apply(ctx, config = {}) {
           const target = String(args?.sessionId ?? '').trim()
           if (!SESSION_ID_RE.test(target)) return `读取失败：sessionId 不合法（${target}）`
           const limit = Number.isInteger(args?.limit) ? Math.min(Math.max(args.limit, 1), 100) : 20
-          const mode = args?.mode === 'summary' || args?.mode === 'tail' ? args.mode : 'search'
+          const offset = Number.isInteger(args?.offset) && args.offset > 0 ? args.offset : 0
+          const mode = args?.mode === 'summary' || args?.mode === 'tail' || args?.mode === 'timeline' ? args.mode : 'search'
+          // 语言：调用方显式给的优先；否则用插件配置（auto 视为"没指定"，交给默认中文）。
+          const lang = typeof args?.lang === 'string' ? args.lang : (resolved.lang === 'auto' ? undefined : resolved.lang)
           try {
             // ttl=0：回查是显式动作，不跟 preview 的快照缓存互相干扰。
             const snapshot = await withTimeout(readSnapshot(ctx, target, 0), 30_000, '读取会话')
             const header = snapshot.session !== null && typeof snapshot.session === 'object' ? snapshot.session : {}
-            if (mode === 'summary') return renderSessionSummary(target, header, snapshot.events)
-            if (mode === 'tail') return renderSessionTail(target, header, snapshot.events, limit)
-            return renderSessionSearch(target, header, snapshot.events, String(args?.query ?? ''), limit)
+            if (mode === 'summary') return renderSessionSummary(target, header, snapshot.events, lang)
+            if (mode === 'tail') return renderSessionTail(target, header, snapshot.events, limit, lang)
+            if (mode === 'timeline') return renderSessionTimeline(target, header, snapshot.events, { limit, offset }, lang)
+            return renderSessionSearch(target, header, snapshot.events, String(args?.query ?? ''), limit, lang)
           } catch (error) {
             note(`session_read FAIL: ${String(error?.message ?? error)}`)
             return `读取失败：${String(error?.message ?? error)}`
@@ -579,6 +705,8 @@ export function apply(ctx, config = {}) {
               start: resolved.startByDefault,
               inheritPreset: true,
               source: 'command',
+              // 命令入口没有界面上下文，语言只能来自配置（auto 就回落中文）。
+              lang: resolved.lang === 'auto' ? undefined : resolved.lang,
             }, resolved)
             const lines = [
               `继承完成：新会话 \`${result.sessionId}\``,

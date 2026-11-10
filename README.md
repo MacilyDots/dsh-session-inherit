@@ -275,8 +275,9 @@ first: on startup a profile validates each plugin's peerDependencies against
 ## Components
 
 - Host half `index.mjs`: registers `POST /__session-inherit/preview`,
-  `POST /__session-inherit/commit`, `POST /__session-inherit/retry` and
-  `GET /__session-inherit/health` (same-origin check, loopback only)
+  `POST /__session-inherit/commit`, `POST /__session-inherit/retry`,
+  `GET /__session-inherit/health` and `GET /__session-inherit/status`
+  (same-origin check + loopback/token boundary)
 - Client half `client.js`: registers `sidebar.workspaces.session.menu.item`
   (id `session-inherit`, order 350) and the preview dialog on `shell.overlay`
 
@@ -297,6 +298,16 @@ Override in the profile's `cordis.patch.yml` (all optional):
     startByDefault: true # default value of the preview checkbox
     cacheTtlMs: 120000   # reuse one log read between preview and commit; 0 = no cache
     previewTimeoutMs: 30000  # upper bound for reading the source session in the preview
+    lang: auto           # auto | zh | en — language of the handoff and tool output;
+                         # auto means "the UI request decides, command/tool entries fall back to zh"
+    inheritReasoningEffort: warn   # warn = disclose in the footer only; inherit = also apply it
+    sections:            # turn low-value sections off to shorten the handoff
+      readFiles: true
+      mentioned: true
+      relativeRefs: true
+      commands: true
+    allowRemote: false   # loopback-only by default; see "Access boundary" below
+    token: ''            # required when allowRemote is on (>= 16 chars)
     timeoutMs:               # commit step budget; a step is capped by min(its own, remaining total)
       total: 60000
       build: 20000
@@ -305,6 +316,20 @@ Override in the profile's `cordis.patch.yml` (all optional):
       workspace: 5000
       inject: 15000
 ```
+
+### Access boundary
+
+All endpoints are loopback-only by default. DSH's web server binds `127.0.0.1`, but if you
+change that binding (LAN or phone access) these endpoints become reachable too — and they
+can write text into any session. So the plugin checks `socket.remoteAddress` itself:
+
+- loopback (`127.0.0.0/8`, `::1`, `::ffff:127.0.0.1`) → allowed;
+- anything else → `403`, unless `allowRemote: true` **and** a `token` is configured and sent
+  as the `x-session-inherit-token` header;
+- unknown source address → rejected (fail closed).
+
+This is separate from the same-origin check: same-origin blocks browser cross-site calls,
+the address check blocks non-local callers.
 
 ## Health check
 
@@ -404,8 +429,9 @@ exists" as the point of no return and never hides it behind an error:
 ## Tests
 
 ```sh
-node test/extract.test.mjs   # extractor pure functions (39)
-node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health and retry endpoints against a fake ctx (33)
+node test/extract.test.mjs   # extractor pure functions (42)
+node test/contract.test.mjs  # real-shape event fixture: anchors, sections, no reasoning/injected noise (4)
+node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status endpoints against a fake ctx (36)
 node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)
 ```
 

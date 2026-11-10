@@ -250,8 +250,9 @@ profile 的 `compatibility.json`——profile 启动时会校验插件对 `@deep
 ## 组件构成
 
 - 宿主半 `index.mjs`：注册 `POST /__session-inherit/preview`、
-  `POST /__session-inherit/commit`、`POST /__session-inherit/retry` 与
-  `GET /__session-inherit/health`（同源校验，仅本机 loopback 使用）
+  `POST /__session-inherit/commit`、`POST /__session-inherit/retry`、
+  `GET /__session-inherit/health` 与 `GET /__session-inherit/status`
+  （同源校验 + 本机地址/token 边界）
 - 客户端半 `client.js`：注册
   `sidebar.workspaces.session.menu.item`(id `session-inherit`, order 350) 与
   `shell.overlay` 上的预览对话框
@@ -272,6 +273,16 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
     startByDefault: true # 预览框里那个勾选框的默认值
     cacheTtlMs: 120000   # preview → commit 之间复用一次日志读；0 = 不缓存
     previewTimeoutMs: 30000  # 预览读源会话的上界
+    lang: auto           # auto | zh | en——交接单与工具返回文本的语言；
+                         # auto 表示"界面请求说了算，命令/工具入口回落中文"
+    inheritReasoningEffort: warn   # warn = 只在页脚披露；inherit = 同时也套用到新会话
+    sections:            # 关掉低信息量章节可以缩短交接单
+      readFiles: true
+      mentioned: true
+      relativeRefs: true
+      commands: true
+    allowRemote: false   # 默认只认本机；见下方「访问边界」
+    token: ''            # allowRemote 打开时必填（≥16 字符）
     timeoutMs:               # commit 分步预算；每步取 min(自己的 cap, 剩余总预算)
       total: 60000
       build: 20000
@@ -280,6 +291,20 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
       workspace: 5000
       inject: 15000
 ```
+
+### 访问边界
+
+所有端点默认只接受本机调用。DSH web 默认绑 `127.0.0.1`，但如果把绑定改成局域网可达
+（手机访问、内网调试），这些端点会跟着暴露——而它们能在任意会话里写文本。所以插件
+自己检查 `socket.remoteAddress`：
+
+- 本机地址（`127.0.0.0/8`、`::1`、`::ffff:127.0.0.1`）→ 放行；
+- 其他地址 → `403`，除非 `allowRemote: true` 且配了 `token`，并在请求头带
+  `x-session-inherit-token`；
+- 拿不到来源地址 → 拒绝（fail closed）。
+
+它和同源校验是两层：同源挡浏览器跨站，地址校验挡非本机调用。
+
 
 ## 健康检查
 
@@ -357,8 +382,9 @@ DSH 升级后觉得哪里不对，先看这里。
 ## 测试
 
 ```sh
-node test/extract.test.mjs   # 提取器纯函数（39）
-node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health 与 retry 端点（33）
+node test/extract.test.mjs   # 提取器纯函数（42）
+node test/contract.test.mjs  # 真实形状事件 fixture：锚点、章节，且不含推理与运行时注入（4）
+node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status 端点（36）
 node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（7）
 ```
 
