@@ -862,3 +862,85 @@ test('三处入口走同一条流水线，产出同形状结果', async () => {
   assert.equal(created, 3, '三处入口各建一次会话，但共用同一套逻辑')
 })
 
+// ── 预设账本的两种格式（2026-11-10 现场回归）──────────────────────────────
+//
+// dsh-tavern 2.7+ 把 session-bindings.json 从「session-xxx: 'preset-id'」改成了
+// 三态对象 {mode:'preset', presetId, source, at, rev} / {mode:'none'}，并且向下兼容
+// 旧字符串；但本插件当时只认字符串，于是 305 条绑定一条都读不到——会话明明绑着
+// 虚拟空间预设，继承出来却是 standard。下面两条用例把两种格式都钉住。
+
+test('预设绑定是对象格式时也要读到（回归：虚拟空间预设整片丢失）', async () => {
+  const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
+  mkdirSync(dirname(bindingsPath), { recursive: true })
+  writeFileSync(bindingsPath, JSON.stringify({
+    [SESSION_ID]: { mode: 'preset', presetId: 'preset-demo-object', source: 'legacy', at: 1_793_876_366_268, rev: 1 },
+  }))
+
+  const handlers = new Map()
+  const created = []
+  const calls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return { ok: true, status: 200, async json() { return { ok: true } } }
+  }
+  try {
+    bootstrap({
+      sessionQuery: makeSessionQuery(sampleEvents()),
+      webServer: { port: 19387, register(route) { handlers.set(route.path, route.handler); return () => {} } },
+      agents: {
+        async create(options) {
+          created.push(options)
+          if (typeof options.setup === 'function') await options.setup({})
+          return { agent: { session: { id: options.sessionId, append() {} } } }
+        },
+      },
+      agentPresets: { async resolve(id) { return { id } }, async mount() {} },
+    })
+
+    const commit = await call(handlers.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+    assert.equal(commit.status, 200)
+    assert.equal(created[0].meta.agentPreset, 'preset-demo-object', '对象格式的 presetId 必须被继承，而不是 header 里的 standard')
+    assert.equal(commit.json.preset, 'preset-demo-object')
+    assert.equal(commit.json.presetInherited, true)
+    assert.equal(calls.length, 1, '账本登记仍要调用一次')
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dirname(bindingsPath), { recursive: true, force: true })
+  }
+})
+
+test("绑定是 mode:'none' 时不当成有绑定，回退 header 的预设", async () => {
+  const bindingsPath = join(process.env.DSH_HOME, '.agent-presets', 'session-bindings.json')
+  mkdirSync(dirname(bindingsPath), { recursive: true })
+  writeFileSync(bindingsPath, JSON.stringify({ [SESSION_ID]: { mode: 'none' } }))
+
+  const handlers = new Map()
+  const created = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, status: 200, async json() { return { ok: true } } })
+  try {
+    bootstrap({
+      sessionQuery: makeSessionQuery(sampleEvents()),
+      webServer: { port: 19387, register(route) { handlers.set(route.path, route.handler); return () => {} } },
+      agents: {
+        async create(options) {
+          created.push(options)
+          if (typeof options.setup === 'function') await options.setup({})
+          return { agent: { session: { id: options.sessionId, append() {} } } }
+        },
+      },
+      agentPresets: { async resolve(id) { return { id } }, async mount() {} },
+    })
+
+    const commit = await call(handlers.get(COMMIT), 'POST', { sessionId: SESSION_ID, start: false })
+    assert.equal(commit.status, 200)
+    // header.agentPreset 是 standard（测试 fixture 里的值），显式解绑不该覆盖它。
+    assert.equal(created[0].meta.agentPreset, 'standard')
+    assert.equal(commit.json.preset, 'standard')
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dirname(bindingsPath), { recursive: true, force: true })
+  }
+})
+
