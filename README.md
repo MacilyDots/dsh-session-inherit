@@ -220,14 +220,25 @@ concatenation of zstd frames (a real 2.7 MB file was split into 1067 frames, and
 tool to close that gap:
 
 ```
-session_read { sessionId, mode: 'search' | 'summary' | 'tail', query?, limit? }
+session_read { sessionId, mode: 'search' | 'summary' | 'tail' | 'timeline' | 'branches',
+               query?, limit?, offset?, allowCrossWorkspace?, lang? }
 ```
 
 - `search` (default): keyword search over the source session, returning surrounding context
 - `summary`: structured digest (task / files edited / recent failures / todos / last reply)
 - `tail`: the last N events that carry content — "where exactly did it stop?"
+- `timeline`: readable events in order, paged with `offset`
+- `branches`: sessions that share the leading events with this one (see below)
 
 It reads only; it never creates or modifies anything.
+
+**`branches` and the workspace boundary.** DSH has no parent-session chain, so "where did this
+session fork from" is answered by comparing event prefixes: two sessions that share the first
+N events verbatim (`time | type | data`, 40 by default) came from the same line. Only the
+**same workspace** is scanned by default — sessions in other workspaces usually belong to other
+projects, so widening it is an explicit `allowCrossWorkspace: true`. The scan reads at most the
+first 64 KB of each candidate and caps the candidate list, which keeps it around 50 ms in a
+workspace holding 600+ sessions.
 
 ## Installation
 
@@ -461,6 +472,7 @@ exists" as the point of no return and never hides it behind an error:
 
 ```sh
 node test/extract.test.mjs   # extractor pure functions (44)
+node test/branches.test.mjs  # fork detection: prefix fingerprints, workspace boundary, zstd + plain jsonl (5)
 node test/contract.test.mjs  # real-shape event fixture: anchors, sections, no reasoning/injected noise (4)
 node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status, preset-adapters, fingerprint and quality against a fake ctx (42)
 node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)

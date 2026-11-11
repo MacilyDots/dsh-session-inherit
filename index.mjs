@@ -32,7 +32,8 @@ import { note, selfTestFlag } from './lib/log.mjs'
 import { buildDoc, derivedCacheStats, getSeenEvents, readSnapshot } from './lib/read.mjs'
 import { allowRequest, readBody, sameOrigin, sendJson } from './lib/security.mjs'
 import { createChild, renameChild } from './lib/session.mjs'
-import { renderSessionSearch, renderSessionSummary, renderSessionTail, renderSessionTimeline } from './lib/session-read.mjs'
+import { findBranches } from './lib/branches.mjs'
+import { renderSessionBranches, renderSessionSearch, renderSessionSummary, renderSessionTail, renderSessionTimeline } from './lib/session-read.mjs'
 import { withTimeout } from './lib/timeouts.mjs'
 
 export const name = 'dsh-session-inherit'
@@ -653,10 +654,11 @@ export function apply(ctx, config = {}) {
           type: 'object',
           properties: {
             sessionId: { type: 'string', description: '会话 id，形如 session-<uuid>——就是继承单首行「来源」里那个。' },
-            mode: { type: 'string', enum: ['search', 'summary', 'tail', 'timeline'], description: 'search=关键词搜索（默认）；summary=结构化摘要；tail=最后若干事件；timeline=从头按序、可用 offset 翻页。' },
+            mode: { type: 'string', enum: ['search', 'summary', 'tail', 'timeline', 'branches'], description: 'search=关键词搜索（默认）；summary=结构化摘要；tail=最后若干事件；timeline=从头按序、可用 offset 翻页；branches=找共享事件前缀的分叉会话。' },
             query: { type: 'string', description: 'mode=search 时的关键词，不区分大小写。' },
             limit: { type: 'number', description: '返回条数上限，默认 20，最大 100。' },
             offset: { type: 'number', description: 'mode=timeline 时的起始偏移（从 0 开始），用于翻页。' },
+            allowCrossWorkspace: { type: 'boolean', description: 'mode=branches 时是否也扫描其他工作区，默认 false（只比同一工作区）。' },
             lang: { type: 'string', enum: ['zh', 'en'], description: '返回文本的语言；不填则跟随插件配置（默认中文）。' },
           },
           required: ['sessionId'],
@@ -671,9 +673,16 @@ export function apply(ctx, config = {}) {
           if (!SESSION_ID_RE.test(target)) return `读取失败：sessionId 不合法（${target}）`
           const limit = Number.isInteger(args?.limit) ? Math.min(Math.max(args.limit, 1), 100) : 20
           const offset = Number.isInteger(args?.offset) && args.offset > 0 ? args.offset : 0
-          const mode = args?.mode === 'summary' || args?.mode === 'tail' || args?.mode === 'timeline' ? args.mode : 'search'
+          const mode = args?.mode === 'summary' || args?.mode === 'tail' || args?.mode === 'timeline' || args?.mode === 'branches'
+            ? args.mode
+            : 'search'
           // 语言：调用方显式给的优先；否则用插件配置（auto 视为"没指定"，交给默认中文）。
           const lang = typeof args?.lang === 'string' ? args.lang : (resolved.lang === 'auto' ? undefined : resolved.lang)
+          // branches 只扫事件前缀，不需要整份日志——别为了"有没有分叉"读一次 10MB。
+          if (mode === 'branches') {
+            const result = findBranches(ctx, target, { allowCrossWorkspace: args?.allowCrossWorkspace === true })
+            return renderSessionBranches(target, {}, result, lang)
+          }
           try {
             // ttl=0：回查是显式动作，不跟 preview 的快照缓存互相干扰。
             const snapshot = await withTimeout(readSnapshot(ctx, target, 0), 30_000, '读取会话')

@@ -195,15 +195,24 @@ slot 的官方内容）。如果装了别的会话菜单插件，你的列表里
 所以本插件另外注册了一个**只读**工具补上这一环：
 
 ```
-session_read { sessionId, mode: 'search' | 'summary' | 'tail', query?, limit? }
+session_read { sessionId, mode: 'search' | 'summary' | 'tail' | 'timeline' | 'branches',
+               query?, limit?, offset?, allowCrossWorkspace?, lang? }
 ```
 
 - `search`（默认）：按关键词搜源会话，返回命中处前后各一段上下文
 - `summary`：结构化摘要（任务目标 / 改过的文件 / 最近失败 / 待办 / 最后一次回复）
 - `tail`：最后 N 个有内容的事件——看"上次到底停在哪"
+- `timeline`：按顺序列出可读事件，用 `offset` 翻页
+- `branches`：找出与它会话开头的若干事件完全相同的会话（见下）
 
 新会话遇到"交接单里那个文件是干什么的"这类问题时可以直接回查，不用你回去翻。
 它只读，不创建也不修改任何东西。
+
+**`branches` 与工作区边界。** DSH 没有父会话链，所以"这个会话从哪条线分出来"只能比事件
+前缀：开头 N 条事件（`time | type | data`，默认 40 条）完全一致的两个会话属于同一条线。
+默认**只扫同一个工作区**——其他工作区的会话通常属于别的项目，要跨区必须显式传
+`allowCrossWorkspace: true`。扫描时每个候选只读前 64KB、候选数也封顶，所以一个装了
+600 多个会话的工作区里，一次检测约 50ms。
 
 > 「附上原对话编号、让新对话顺着编号去找」这个想法的闭环就在这儿：光有编号没用，
 > 得让它读得到。
@@ -411,6 +420,7 @@ DSH 升级后觉得哪里不对，先看这里。
 
 ```sh
 node test/extract.test.mjs   # 提取器纯函数（44）
+node test/branches.test.mjs  # 分叉检测：前缀指纹、工作区边界、zstd 与明文两种存储（5）
 node test/contract.test.mjs  # 真实形状事件 fixture：锚点、章节，且不含推理与运行时注入（4）
 node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status、预设适配器、指纹与质量评估（42）
 node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（7）
