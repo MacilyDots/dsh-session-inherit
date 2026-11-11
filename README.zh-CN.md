@@ -321,6 +321,19 @@ profile 的 `cordis.patch.yml` 里可以覆盖（全部可选）：
 它和同源校验是两层：同源挡浏览器跨站，地址校验挡非本机调用。
 
 
+## 预览的质量与一致性
+
+有两种情况会让交接单白继承，而且都不会报错：
+
+- **源会话又往前走了。** `commit` 总是重读源会话，与 preview 返回的指纹比对。事件数变了
+  时提交仍然成功，但会带 `source-changed` 告警——交接单可能不含最新几轮。
+- **本来就没东西可交。** 角色扮演类会话机械提取出来只有一个角色名、零个文件、零条命令。
+  预览会返回 `quality: {score: 'thin', reasons: [...]}`，对话框如实提示，而不是让你继承
+  一个空壳过去。
+
+对话框还会列出这个会话已经被继承进哪些子会话，而不只是一个次数——同一源会话可能被反复
+继承，看到"是谁"才防得住再来一次。
+
 ## 健康检查
 
 `GET /__session-inherit/health` 只读，回答"这个插件现在看到了什么"：
@@ -397,9 +410,9 @@ DSH 升级后觉得哪里不对，先看这里。
 ## 测试
 
 ```sh
-node test/extract.test.mjs   # 提取器纯函数（42）
+node test/extract.test.mjs   # 提取器纯函数（44）
 node test/contract.test.mjs  # 真实形状事件 fixture：锚点、章节，且不含推理与运行时注入（4）
-node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status 端点与预设账本适配器（39）
+node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status、预设适配器、指纹与质量评估（42）
 node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（7）
 ```
 

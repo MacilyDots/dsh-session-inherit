@@ -193,7 +193,7 @@ test('preview 返回带具体锚点的交接单', async () => {
   assert.equal(sessionQuery.calls, 1)
 })
 
-test('preview 的连接被缓存：commit 不再重复读日志', async () => {
+test('preview 复用快照，commit 必定重读（交接单不能是过期快照）', async () => {
   const sessionQuery = makeSessionQuery(sampleEvents())
   const created = []
   const prompted = []
@@ -212,11 +212,17 @@ test('preview 的连接被缓存：commit 不再重复读日志', async () => {
   }, { cacheTtlMs: 120_000 })
   const preview = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
   assert.equal(preview.status, 200)
-  const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, doc: preview.json.doc, start: true })
+  // 缓存窗口内的第二次 preview 不该再读日志（用户改「下一步」会重新渲染）。
+  const previewAgain = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
+  assert.equal(previewAgain.status, 200)
+  assert.equal(sessionQuery.calls, 1, '连续 preview 之间复用快照')
+
+  const commit = await call(routes.get(COMMIT), 'POST', { sessionId: SESSION_ID, doc: previewAgain.json.doc, start: true })
   assert.equal(commit.status, 200)
   assert.equal(commit.json.ok, true)
   assert.equal(commit.json.mode, 'prompted')
-  assert.equal(sessionQuery.calls, 1, '同一个会话在缓存窗口内只应读一次')
+  // commit 是结果时刻：preview 之后源会话可能又长了几轮，命中缓存会静默交出过期单据。
+  assert.equal(sessionQuery.calls, 2, 'commit 必须重读一次源会话')
 
   assert.equal(created.length, 1)
   const options = created[0]
@@ -1129,6 +1135,59 @@ test('preview 返回裁剪版锚点，客户端不必再读一遍会话日志', 
   assert.ok(Array.isArray(anchors.todos))
   assert.ok('lastTurn' in anchors)
 })
+
+// ── 预览一致性 / 质量评估 / 继承链（0.9.x）────────────────────────────────
+
+test('preview 带源会话指纹与交接单质量评估', async () => {
+  const { routes } = bootstrap({ sessionQuery: makeSessionQuery(sampleEvents()) })
+  const preview = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
+  assert.equal(preview.status, 200)
+  assert.equal(typeof preview.json.fingerprint.eventCount, 'number')
+  assert.equal(typeof preview.json.fingerprint.lastTime, 'number')
+  assert.ok(['ok', 'thin'].includes(preview.json.quality.score))
+  assert.ok(Array.isArray(preview.json.quality.reasons))
+})
+
+test('预览之后源会话变了，commit 给出 source-changed 告警', async () => {
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: { async create(options) { return { agent: { session: { id: options.sessionId, append() {} } } } } },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  }, { startByDefault: false })
+
+  const commit = await call(routes.get(COMMIT), 'POST', {
+    sessionId: SESSION_ID,
+    // 伪造一个与真实事件数不同的指纹：模拟"预览之后源会话又长了几轮"。
+    fingerprint: { eventCount: 1, lastTime: 1, turns: 1 },
+    start: false,
+  })
+  assert.equal(commit.status, 200)
+  assert.ok(
+    Array.isArray(commit.json.warnings) && commit.json.warnings.some((item) => item.code === 'source-changed'),
+    '源会话变了必须告警，不能静默交出过期交接单',
+  )
+})
+
+test('指纹一致时不产生 source-changed 告警', async () => {
+  const { routes } = bootstrap({
+    sessionQuery: makeSessionQuery(sampleEvents()),
+    agents: { async create(options) { return { agent: { session: { id: options.sessionId, append() {} } } } } },
+    sessionController: { async prompt() { return { accepted: true } } },
+    sessionTitle: { rename() {} },
+  }, { startByDefault: false })
+
+  const preview = await call(routes.get(PREVIEW), 'POST', { sessionId: SESSION_ID })
+  const commit = await call(routes.get(COMMIT), 'POST', {
+    sessionId: SESSION_ID,
+    fingerprint: preview.json.fingerprint,
+    start: false,
+  })
+  assert.equal(commit.status, 200)
+  const codes = (commit.json.warnings ?? []).map((item) => item.code)
+  assert.ok(!codes.includes('source-changed'))
+})
+
 
 // ── 预设账本适配器（P2-6）────────────────────────────────────────────────
 

@@ -347,6 +347,21 @@ can write text into any session. So the plugin checks `socket.remoteAddress` its
 This is separate from the same-origin check: same-origin blocks browser cross-site calls,
 the address check blocks non-local callers.
 
+## Preview quality and consistency
+
+Two things can make a handoff useless without producing any error:
+
+- **The source session moved on.** `commit` always re-reads the source session and compares it
+  with the fingerprint the preview returned. If the event count changed, the commit still
+  succeeds but carries a `source-changed` warning — the handoff may miss the last few turns.
+- **There is nothing to hand off.** For a role-play session the mechanical extraction finds a
+  character name, zero files and zero commands. The preview reports
+  `quality: {score: 'thin', reasons: [...]}` and the dialog says so, instead of letting you
+  inherit an empty shell.
+
+The dialog also lists the sessions this one has already been inherited into, not just a count —
+a source can be inherited repeatedly, and seeing the children is what prevents another one.
+
 ## Health check
 
 `GET /__session-inherit/health` is read-only and answers "what does this plugin
@@ -445,9 +460,9 @@ exists" as the point of no return and never hides it behind an error:
 ## Tests
 
 ```sh
-node test/extract.test.mjs   # extractor pure functions (42)
+node test/extract.test.mjs   # extractor pure functions (44)
 node test/contract.test.mjs  # real-shape event fixture: anchors, sections, no reasoning/injected noise (4)
-node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status endpoints and the preset-adapters against a fake ctx (39)
+node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status, preset-adapters, fingerprint and quality against a fake ctx (42)
 node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)
 ```
 

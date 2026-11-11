@@ -51,6 +51,13 @@ window.__ModuleLoader__.load({
       'dialog.docShow': '展开交接单全文（可编辑）',
       'dialog.docHide': '收起交接单',
       'dialog.inherited': '这个会话已经被继承过 {count} 次，最近一次 {time} → {child}',
+      'dialog.qualityThin': '这份交接单信息量偏低：{reasons}。继承过去能帮上的有限。',
+      'dialog.reason.no-task': '没有可识别的任务目标',
+      'dialog.reason.weak-task': '任务目标可能只是短开场',
+      'dialog.reason.no-concrete': '没有改过的文件、读过的文件或命令',
+      'dialog.reason.no-paths': '没有可定位的路径',
+      'dialog.childFailed': '（注入失败）',
+      'dialog.childPending': '（未完成）',
       'dialog.start': '创建后立即开始工作（取消勾选则只写入交接单，打开新会话后可以自己选预设再开始）',
       'dialog.inheritPreset': '继承当前对话的预设（取消勾选则新会话用默认预设）',
       'dialog.presetInherited': '已挂到新会话的预设：',
@@ -77,6 +84,13 @@ window.__ModuleLoader__.load({
       'dialog.docShow': 'Show the full handoff (editable)',
       'dialog.docHide': 'Hide the handoff',
       'dialog.inherited': 'This session has been inherited {count} time(s); most recently {time} → {child}',
+      'dialog.qualityThin': 'This handoff carries little information: {reasons}. Inheriting may not help much.',
+      'dialog.reason.no-task': 'no recognizable task',
+      'dialog.reason.weak-task': 'the task statement may just be an opener',
+      'dialog.reason.no-concrete': 'no edited/read files or commands',
+      'dialog.reason.no-paths': 'no locatable paths',
+      'dialog.childFailed': ' (injection failed)',
+      'dialog.childPending': ' (incomplete)',
       'dialog.start': 'Start working immediately (uncheck to only write the handoff — you can pick a preset when you open it)',
       'dialog.inheritPreset': "Inherit the current session's preset (uncheck to use the default preset)",
       'dialog.presetInherited': 'Preset mounted on the new session: ',
@@ -370,6 +384,9 @@ window.__ModuleLoader__.load({
             start: start,
             // 默认勾选：继承当前对话的预设。
             inheritPreset: inheritPreset,
+            // 预览时刻的源会话指纹：宿主在 commit 时重读并比对，变了会告警
+            // 「交接单可能不含最新几轮」。
+            fingerprint: detail.fingerprint && typeof detail.fingerprint === 'object' ? detail.fingerprint : null,
           }),
           signal: abort.signal,
         })
@@ -473,8 +490,28 @@ window.__ModuleLoader__.load({
         }, headText))
       }
 
+      // 交接单薄到没有意义时先劝一句：角色扮演类会话继承过去往往一片空白，
+      // 等用户点完才发现就晚了。
+      var quality = detail.quality
+      if (quality !== null && typeof quality === 'object' && quality.score === 'thin') {
+        body.push(h('div', {
+          key: 'quality',
+          style: {
+            fontSize: 12,
+            lineHeight: '18px',
+            marginBottom: 10,
+            color: 'var(--dsw-alias-state-warning-primary, #d97706)',
+          },
+        }, t('dialog.qualityThin', {
+          reasons: (Array.isArray(quality.reasons) ? quality.reasons : [])
+            .map(function (code) { return t('dialog.reason.' + code) })
+            .join('、'),
+        })))
+      }
+
       // 「这个会话已经被继承过」：源会话（常常是冷的）改不了标题——sessionTitle.rename
       // 要求活着的 session 对象——所以提示放在用户即将再次继承的这个时刻。
+      // 只给次数看不到是谁，防不住重复继承，所以再列一下子会话。
       var inherited = Array.isArray(detail.inherited) ? detail.inherited : []
       if (inherited.length > 0) {
         var latestMark = inherited[inherited.length - 1]
@@ -483,13 +520,28 @@ window.__ModuleLoader__.load({
           style: {
             fontSize: 12,
             lineHeight: '18px',
-            marginBottom: 10,
+            marginBottom: 4,
             color: 'var(--dsw-alias-state-warning-primary, #d97706)',
           },
         }, t('dialog.inherited', {
           count: inherited.length,
           time: shortTime(latestMark !== null && typeof latestMark === 'object' ? latestMark.at : 0),
           child: shortId(latestMark !== null && typeof latestMark === 'object' ? latestMark.child : ''),
+        })))
+        body.push(h('ul', {
+          key: 'inheritedList',
+          style: {
+            margin: '0 0 10px 0',
+            paddingLeft: 18,
+            fontSize: 12,
+            lineHeight: '18px',
+            color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+          },
+        }, inherited.slice(-4).map(function (item, index) {
+          var stateNote = item && item.state === 'failed' ? t('dialog.childFailed')
+            : item && item.state === 'pending' ? t('dialog.childPending') : ''
+          return h('li', { key: 'inh' + index }, shortTime(item && typeof item.at === 'number' ? item.at : 0)
+            + ' → ' + shortId(item && typeof item.child === 'string' ? item.child : '') + stateNote)
         })))
       }
 

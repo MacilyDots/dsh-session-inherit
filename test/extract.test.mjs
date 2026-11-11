@@ -3,6 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   annotatePresetLine,
+  assessQuality,
   collectAnchors,
   composeInheritDoc,
   isInheritDoc,
@@ -752,6 +753,23 @@ test('timeline 从头按序，且支持 offset 翻页', () => {
   assert.doesNotMatch(page2, /第一条/)
   // 英文界面下文案跟语言走
   assert.match(renderSessionTimeline('session-x', {}, events, { limit: 1 }, 'en'), /Timeline of session/)
+})
+
+test('assessQuality 把"只有一个角色名"的会话判为 thin', () => {
+  const events = [
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [{ type: 'text', text: '屠冥' }] } },
+  ]
+  const quality = assessQuality(collectAnchors(events))
+  assert.equal(quality.score, 'thin')
+  assert.ok(quality.reasons.includes('weak-task'))
+  assert.ok(quality.reasons.includes('no-concrete'))
+  assert.ok(quality.reasons.includes('no-paths'))
+})
+
+test('assessQuality 对正常工程会话判为 ok', () => {
+  const quality = assessQuality(collectAnchors(sampleEvents()))
+  assert.equal(quality.score, 'ok')
 })
 
 

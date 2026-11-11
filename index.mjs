@@ -24,7 +24,7 @@
 
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { EVENTS, inspectBindings, ownVersion, probe } from './lib/contracts.mjs'
-import { DOC_MARK, formatTime } from './lib/extract.mjs'
+import { assessQuality, DOC_MARK, formatTime } from './lib/extract.mjs'
 import { resolveConfig } from './lib/config.mjs'
 import { InheritError, inheritSession, retryInjection } from './lib/inherit.mjs'
 import { readInheritedBy } from './lib/history.mjs'
@@ -133,6 +133,15 @@ async function handlePreview(ctx, resolved, req, res) {
       boundPreset: built.boundPreset ?? null,
       // 这个会话以前被继承过几次：在用户即将再次继承时提示，防止重复继承。
       inherited: readInheritedBy(sessionId),
+      // 预览时刻的源会话指纹：commit 时重读一遍比对，变了就告诉用户交接单可能
+      // 不含最新几轮（用户可能先看预览、回源会话又说几句、再点确认）。
+      fingerprint: {
+        eventCount: built.anchors.eventCount,
+        lastTime: built.anchors.lastTime,
+        turns: built.anchors.turns,
+      },
+      // 这份交接单到底有多少信息量。薄到没有意义时如实说，别让用户继承一片空白。
+      quality: assessQuality(built.anchors),
       warnings: [],
     })
   } catch (error) {
@@ -191,6 +200,8 @@ async function handleCommit(ctx, resolved, req, res) {
       inheritPreset: typeof args?.inheritPreset === 'boolean' ? args.inheritPreset : true,
       lang: typeof args?.lang === 'string' ? args.lang : undefined,
       source: 'http',
+      // preview 时源会话的指纹；服务端在 commit 时重读并比对。
+      fingerprint: args?.fingerprint !== null && typeof args?.fingerprint === 'object' ? args.fingerprint : null,
     }, resolved)
     recordRecentInherit({
       sessionId: result.sessionId,
