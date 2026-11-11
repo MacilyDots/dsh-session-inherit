@@ -1014,6 +1014,11 @@ test('health 报告服务清单、账本格式与缓存状态', async () => {
     assert.ok(Array.isArray(health.json.services.available))
     assert.ok(Array.isArray(health.json.events.expected))
     assert.equal(typeof health.json.cache.size, 'number')
+    // 诊断端点必须把生效配置全报出来，否则"配置写错了"和"配置没生效"分不清。
+    for (const key of ['lang', 'inheritReasoningEffort', 'presetAdapter', 'sections', 'allowRemote', 'tokenConfigured']) {
+      assert.ok(key in health.json.config, `health.config 缺少 ${key}`)
+    }
+    assert.equal(health.json.config.tokenConfigured, false)
   } finally {
     // 账本是全局文件（DSH_HOME 下），不清理会污染后面的用例。
     rmSync(dirname(bindingsPath), { recursive: true, force: true })

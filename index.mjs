@@ -397,6 +397,13 @@ function handleHealth(ctx, resolved, req, res) {
       startByDefault: resolved.startByDefault,
       cacheTtlMs: resolved.cacheTtlMs,
       previewTimeoutMs: resolved.previewTimeoutMs,
+      lang: resolved.lang,
+      inheritReasoningEffort: resolved.inheritReasoningEffort,
+      presetAdapter: resolved.presetAdapter,
+      sections: resolved.sections,
+      // 只报开关，不报 token 值本身。
+      allowRemote: resolved.allowRemote,
+      tokenConfigured: typeof resolved.token === 'string' && resolved.token.length > 0,
       timeoutMs: resolved.timeoutMs,
     },
   })
