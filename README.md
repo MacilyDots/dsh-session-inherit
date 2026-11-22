@@ -240,6 +240,57 @@ projects, so widening it is an explicit `allowCrossWorkspace: true`. The scan re
 first 64 KB of each candidate and caps the candidate list, which keeps it around 50 ms in a
 workspace holding 600+ sessions.
 
+### Entry point 4 (for plugins): the `sessionInherit` in-process service
+
+The first three entry points are for people; this one is for **other plugins** (e.g.
+dsh-degen-guard calling it optionally on a degeneration trip). It is published with
+`ctx.provide('sessionInherit', api)`. Consumers declare `export const inject = ['sessionInherit']`,
+or read it with `ctx.get('sessionInherit')`.
+
+```
+await api.handoff({
+  sourceId,                        // required: the tripped/inherited source session
+  mode: 'hint'|'draft'|'auto',     // default 'draft'
+  parentSessionId, depth,          // forwarded to the callback; depth is the PARENT's depth (root = 0)
+  nextStep, title, lang,
+  inheritPreset,                   // default true
+  onChildCreated,                  // ★ awaited after the child exists, before any inject/prompt
+})
+```
+
+Mode semantics:
+
+| mode | creates child | starts | state |
+|---|---|---|---|
+| `hint` | no | no | `hinted` (read-only suggestion) |
+| `draft` | yes | no (start:false, append only) | `draft` |
+| `auto` | yes | prompt only after cwd/preset checks and depth registration | `started` / `draft-fallback` |
+
+The result is `{ok, mode, state, childId, doc, cwd, preset, workspace, preflight, warnings, note}`.
+`state` values: `hinted` / `draft` / `started` / `draft-fallback` (check or registration failed —
+the **same child** gets a draft append, never recreated) / `pending-injection` (child created but
+injection failed, childId retained) / `create-timeout` (may have been created, id unknown — never
+retried) / `failed`.
+
+**Why `onChildCreated` runs before start:** a circuit-breaker guard must register
+`childId → depth` before the child begins working. If notification came after prompt, a fast
+second degeneration would not recognize the child as the next generation and would create
+another one — the fast-trip race. The service therefore `await`s the callback right after
+creating the child and before any prompt; a thrown callback means "depth not registered", so
+`auto` degrades to a draft on that same child. The companion depth API is idempotent per child
+(first write wins):
+
+```
+api.registerChildDepth(parentSessionId, childSessionId, depth)
+// → {registered:true, parentSessionId, childSessionId, depth, at}
+//   registering the same childId again → {registered:false, ...existing record}
+api.depthOf(childSessionId)  // → record or null
+api.probe()                  // read-only health check
+```
+
+The three manual entry points are unaffected; if service registration fails it only logs and
+degrades.
+
 ## Installation
 
 From npm (recommended, one command):
@@ -475,7 +526,8 @@ node test/extract.test.mjs   # extractor pure functions (44)
 node test/branches.test.mjs  # fork detection: prefix fingerprints, workspace boundary, zstd + plain jsonl (5)
 node test/contract.test.mjs  # real-shape event fixture: anchors, sections, no reasoning/injected noise (4)
 node test/host.test.mjs      # host half: endpoint registration, the full preview/commit path, /inherit argument parsing, preset inheritance, the inherit ledger, health/retry/status, preset-adapters, fingerprint and quality against a fake ctx (42)
-node test/client.test.mjs    # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)
+node test/client.test.mjs         # client half: module protocol, slot registration, fallback menu row, and menu → preview → collapse/expand → confirm → commit (7)
+node test/inherit-service.test.mjs # in-process service: hint/draft/auto, onChildCreated timing, check-failure fallback, depth idempotency, concurrent dedup (12)
 ```
 
 ## Releasing

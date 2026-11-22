@@ -217,6 +217,52 @@ session_read { sessionId, mode: 'search' | 'summary' | 'tail' | 'timeline' | 'br
 > 「附上原对话编号、让新对话顺着编号去找」这个想法的闭环就在这儿：光有编号没用，
 > 得让它读得到。
 
+### 入口四（程序用）：`sessionInherit` 进程内服务
+
+前三条入口都面向人；这一条面向**其他插件**（如 dsh-degen-guard 在退化熔断时
+可选调用）。服务通过 `ctx.provide('sessionInherit', api)` 发布，消费方声明
+`export const inject = ['sessionInherit']`，或用 `ctx.get('sessionInherit')` 取。
+
+```
+await api.handoff({
+  sourceId,                // 必填，被熔断/继承的源会话
+  mode: 'hint'|'draft'|'auto',   // 默认 'draft'
+  parentSessionId, depth,        // 供回调回填（depth 传父会话深度，根 = 0）
+  nextStep, title, lang,
+  inheritPreset,                  // 默认 true
+  onChildCreated,                 // ★子会话建好后、任何注入/启动之前被 await★
+})
+```
+
+三种模式的语义：
+
+| mode | 建会话 | 启动 | state |
+|---|---|---|---|
+| `hint` | 否 | 否 | `hinted`（只读建议） |
+| `draft` | 是 | 否（start:false，只 append） | `draft` |
+| `auto` | 是 | 核对 cwd/预设且深度登记成功才 prompt | `started` / `draft-fallback` |
+
+返回 `{ok, mode, state, childId, doc, cwd, preset, workspace, preflight, warnings, note}`；
+`state` 的完整取值：`hinted` / `draft` / `started` / `draft-fallback`（核对或登记
+失败，**同一 child** 改草稿，绝不重建） / `pending-injection`（已建但注入失败，
+childId 保留） / `create-timeout`（可能已建但 id 未知，绝不重试） / `failed`。
+
+**为什么 `onChildCreated` 必须在启动之前**：熔断守卫要在子会话开始工作前登记
+`childId → 深度`。若等 prompt 之后才通知，子会话快速再退化时守卫认不出它是链上的
+新一代，会再建一个 child——快速熔断竞态就是这么来的。所以服务在建出 child 之后、
+任何 prompt 之前 `await` 这个回调；回调抛错即视为"深度未登记"，auto 降级为同一
+child 上的草稿注入。配套的深度登记 API 按子会话幂等（先到为准）：
+
+```
+api.registerChildDepth(parentSessionId, childSessionId, depth)
+// → {registered:true, parentSessionId, childSessionId, depth, at}
+//   重复登记同一 childId → {registered:false, ...既有记录}
+api.depthOf(childSessionId)  // → 记录或 null
+api.probe()                  // 只读健康检查
+```
+
+手动继承的三条入口不受此服务影响；服务注册失败时也只是记日志降级。
+
 ## 安装
 
 从 npm 装（推荐，一条命令）：
@@ -424,6 +470,7 @@ node test/branches.test.mjs  # 分叉检测：前缀指纹、工作区边界、z
 node test/contract.test.mjs  # 真实形状事件 fixture：锚点、章节，且不含推理与运行时注入（4）
 node test/host.test.mjs      # 宿主半：假 ctx 跑通端点注册、preview/commit 全链路、/inherit 参数解析、预设继承、继承记录、health/retry/status、预设适配器、指纹与质量评估（42）
 node test/client.test.mjs    # 客户端半：模块协议、slot 注册、降级菜单行，以及菜单→preview→折叠/展开→确认→commit 全链路（7）
+node test/inherit-service.test.mjs # 进程内服务：hint/draft/auto、onChildCreated 时序、核对失败降级、深度幂等、并发去重（12）
 ```
 
 ## 发布

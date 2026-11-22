@@ -38,7 +38,7 @@
     "url": "https://github.com/MacilyDots/dsh-session-inherit/issues"
   },
   "scripts": {
-    "test": "node test/extract.test.mjs && node test/branches.test.mjs && node test/contract.test.mjs && node test/host.test.mjs && node test/client.test.mjs"
+    "test": "node test/extract.test.mjs && node test/branches.test.mjs && node test/contract.test.mjs && node test/host.test.mjs && node test/client.test.mjs && node test/inherit-service.test.mjs"
   },
   "dsh": {
     "bundle": {

@@ -32,6 +32,7 @@ import { note, selfTestFlag } from './lib/log.mjs'
 import { buildDoc, derivedCacheStats, getSeenEvents, readSnapshot } from './lib/read.mjs'
 import { allowRequest, readBody, sameOrigin, sendJson } from './lib/security.mjs'
 import { createChild, renameChild } from './lib/session.mjs'
+import { createInheritService } from './lib/inherit-service.mjs'
 import { findBranches } from './lib/branches.mjs'
 import { renderSessionBranches, renderSessionSearch, renderSessionSummary, renderSessionTail, renderSessionTimeline } from './lib/session-read.mjs'
 import { withTimeout } from './lib/timeouts.mjs'
@@ -532,6 +533,18 @@ export function apply(ctx, config = {}) {
   // 运行期事实，交给 health 端点（见 handleHealth）。
   const bindings = inspectBindings()
   note(`probe: bindings state=${bindings.state} entries=${bindings.entries} (object=${bindings.object} legacy=${bindings.legacy} none=${bindings.none} invalid=${bindings.invalid})`)
+
+  // ── 进程内继承服务（供 degen-guard 等插件可选调用）─────────────────────
+  // 手动继承的 HTTP / 工具 / 命令入口完全不动；这里只额外发布一个进程内服务。
+  // 用 ctx.provide 而非直接挂属性：本机构建的 Cordis 契约是 provide 发布、
+  // ctx.get/inject 消费（证据：dsh-purge/lib/redteam/store.js:77 与 ui.js:155）。
+  // 整段 try/catch：服务注册失败绝不能连累手工继承这条主路。
+  try {
+    ctx.provide('sessionInherit', createInheritService(ctx, resolved))
+    note('service: sessionInherit 已发布（handoff/registerChildDepth/depthOf/probe）')
+  } catch (error) {
+    note(`service: sessionInherit 发布失败（已忽略，手工继承不受影响）: ${String(error?.message ?? error)}`)
+  }
 
   /**
    * 注册两个 HTTP 端点。

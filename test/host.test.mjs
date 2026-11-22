@@ -143,6 +143,7 @@ function bootstrap(services = {}, config = { cacheTtlMs: 0 }) {
       const disposer = callback()
       return typeof disposer === 'function' ? disposer : () => {}
     },
+    provide(name, value) { services.provided ??= {}; services.provided[name] = value },
     inject(_names, callback) { callback(ctx) },
     on() { return () => {} },
     logger() { return { info() {}, warn() {}, error() {} } },
@@ -309,6 +310,7 @@ test('没有 webServer 服务时不抛错（终端型 profile 降级）', () => 
     agents: {},
     get() { return undefined },
     effect() { return () => {} },
+    provide() {},
     inject(_names, callback) { callback(ctx) },
     on() { return () => {} },
     logger() { return { info() {}, warn() {}, error() {} } },
@@ -323,6 +325,7 @@ test('enabled:false 时不注册任何路由', () => {
     agents: {},
     get(serviceName) { return serviceName === 'webServer' ? webServer : undefined },
     effect(callback) { const d = callback(); return typeof d === 'function' ? d : () => {} },
+    provide() {},
     inject(_names, callback) { callback(ctx) },
     on() { return () => {} },
     logger() { return { info() {}, warn() {}, error() {} } },
